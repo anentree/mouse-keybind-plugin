@@ -4,6 +4,9 @@
   <img src="assets/mouse-keybind-icon.png" alt="Mouse & Keybind Plugin toolbar icon" width="140" height="60" />
 </p>
 
+<img width="799" height="446" alt="Mouse   Keybind Settings" src="https://github.com/user-attachments/assets/3ab1498b-56fb-4fcc-b5c4-7d53f245fcf4" />
+
+
 All in a single toolbar widget with one icon giving you access to both, pointer configuration and Hyprland keybinding management.
 
 Plugin ID: `davedes.mouse-keybind-settings`

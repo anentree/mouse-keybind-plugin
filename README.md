@@ -82,3 +82,6 @@ omarchy-shell shell summon davedes.mouse-keybind-settings '{}'
 
 MIT
 
+## Buy Me A Coffee
+PayPal @DavidDesousa13
+

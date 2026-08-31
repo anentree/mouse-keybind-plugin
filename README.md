@@ -1,10 +1,5 @@
 # Mouse & Keybind Plugin
 
-A combined Omarchy plugin merging the functionality of:
-
-- [Mouse & Pointer Settings](https://github.com/meviusisback/mouse-settings)
-- [Keybindings Plugin](https://github.com/meviusisback/keybinds-plugin)
-
 All in a single toolbar widget with one icon giving you access to both — pointer configuration and Hyprland keybinding management.
 
 Plugin ID: `davedes.mouse-keybind-settings`

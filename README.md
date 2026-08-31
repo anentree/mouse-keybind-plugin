@@ -1,12 +1,16 @@
 # Mouse & Keybind Plugin
 
+<p align="center">
+  <img src="assets/mouse-keybind-icon.png" alt="Mouse & Keybind Plugin toolbar icon" width="140" height="60" />
+</p>
+
 All in a single toolbar widget with one icon giving you access to both, pointer configuration and Hyprland keybinding management.
 
 Plugin ID: `davedes.mouse-keybind-settings`
 
 ## Features
 
-- **Single toolbar icon** (`󰍽`) providing access to both mouse settings and keybind manager.
+- **Single toolbar icon** — a mouse + keyboard glyph giving access to both mouse settings and keybind manager.
 - **Mouse & Pointer tab**: cursor speed, precision (1:1) vs dynamic acceleration profiles, natural scroll, scroll sensitivity, left-handed mode, focus-follows-cursor, auto-refocus, button remapping, synthetic button press simulation (ydotool), interactive test canvas, and mouse battery indicator.
 - **Keybinds tab**: live summary of active / modified / conflicting keybindings, plus a one-click launcher for the full Keybind Manager (search, edit, create, reset, disable/enable, conflict detection with 1-click rebind, smart free-key recommendations, and safe Lua sync).
 
@@ -78,5 +82,8 @@ omarchy-shell shell summon davedes.mouse-keybind-settings '{}'
 MIT
 
 ## Buy Me A Coffee
-PayPal @DavidDesousa13
+
+If this plugin is useful, you can buy me a coffee:
+
+- &#9749; [Buy me a coffee on PayPal](https://www.paypal.com/paypalme/DavidDesousa13) (@DavidDesousa13)
 

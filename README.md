@@ -87,7 +87,7 @@ MIT
 
 ## Buy Me A Coffee
 
-If this plugin is useful, you can buy me a coffee:
+Enjoying the plugin? You can support my work by buying me a coffee!:
 
 - &#9749; [Buy me a coffee on PayPal](https://www.paypal.com/paypalme/DavidDesousa13) (@DavidDesousa13)
 

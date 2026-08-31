@@ -1,6 +1,6 @@
 # Mouse & Keybind Plugin
 
-All in a single toolbar widget with one icon giving you access to both — pointer configuration and Hyprland keybinding management.
+All in a single toolbar widget with one icon giving you access to both, pointer configuration and Hyprland keybinding management.
 
 Plugin ID: `davedes.mouse-keybind-settings`
 

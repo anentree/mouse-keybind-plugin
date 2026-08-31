@@ -1,0 +1,84 @@
+# Mouse & Keybind Plugin
+
+A combined Omarchy plugin merging the functionality of:
+
+- [Mouse & Pointer Settings](https://github.com/meviusisback/mouse-settings)
+- [Keybindings Plugin](https://github.com/meviusisback/keybinds-plugin)
+
+All in a single toolbar widget with one icon giving you access to both — pointer configuration and Hyprland keybinding management.
+
+Plugin ID: `davedes.mouse-keybind-settings`
+
+## Features
+
+- **Single toolbar icon** (`󰍽`) providing access to both mouse settings and keybind manager.
+- **Mouse & Pointer tab**: cursor speed, precision (1:1) vs dynamic acceleration profiles, natural scroll, scroll sensitivity, left-handed mode, focus-follows-cursor, auto-refocus, button remapping, synthetic button press simulation (ydotool), interactive test canvas, and mouse battery indicator.
+- **Keybinds tab**: live summary of active / modified / conflicting keybindings, plus a one-click launcher for the full Keybind Manager (search, edit, create, reset, disable/enable, conflict detection with 1-click rebind, smart free-key recommendations, and safe Lua sync).
+
+## Installation
+
+Clone the repository into your user plugins directory and enable it:
+
+```bash
+git clone https://github.com/Davedes83/mouse-keybind-plugin \
+  ~/.config/omarchy/plugins/davedes.mouse-keybind-settings
+omarchy plugin add ~/.config/omarchy/plugins/davedes.mouse-keybind-settings --enable
+```
+
+Or install it directly from the repo URL:
+
+```bash
+omarchy plugin clone Davedes83/mouse-keybind-plugin --enable
+```
+
+Afterwards restart the shell to load the widget:
+
+```bash
+omarchy restart shell
+```
+
+Prerequisite for button simulation (optional):
+
+```bash
+sudo pacman -S ydotool
+systemctl --user enable --now ydotool.service
+```
+
+## Usage
+
+Left-click the toolbar icon to open the settings popup. Switch between the **Mouse Settings** and **Keybinds** tabs. Right-click the toolbar icon to quickly toggle between Precision (1:1) and Dynamic acceleration.
+
+### CLI
+
+Replace `$HOME` with your home directory; the plugin lives by default at
+`~/.config/omarchy/plugins/davedes.mouse-keybind-settings/`.
+
+```bash
+P="$HOME/.config/omarchy/plugins/davedes.mouse-keybind-settings"
+
+# Mouse
+python3 "$P/mouse_ctl.py" status
+python3 "$P/mouse_ctl.py" toggle-accel
+python3 "$P/mouse_ctl.py" toggle-natural-scroll
+python3 "$P/mouse_ctl.py" apply --json-data '{...}'
+python3 "$P/mouse_ctl.py" simulate-button --button side_back
+
+# Keybinds
+"$P/bin/omarchy-keybinds" list
+"$P/bin/omarchy-keybinds" set "SUPER + SHIFT + B" "My Browser" "omarchy-launch-browser"
+"$P/bin/omarchy-keybinds" reset "SUPER + SHIFT + B"
+"$P/bin/omarchy-keybinds" disable "SUPER + W"
+```
+
+### IPC
+
+```bash
+omarchy-shell davedes.mouse-keybind-settings toggle
+omarchy-shell davedes.mouse-keybind-settings toggleAccel
+omarchy-shell shell summon davedes.mouse-keybind-settings '{}'
+```
+
+## License
+
+MIT
+

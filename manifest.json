@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "id": "davedes.mouse-keybind-settings",
+  "name": "Mouse & Keybind Settings",
+  "version": "1.0.0",
+  "author": "davedes",
+  "license": "MIT",
+  "description": "Combined graphical configuration for mouse/pointer settings and Hyprland keybindings — cursor speed, acceleration profiles, scroll behavior, button remapping, synthetic button presses, battery indicator, and full keybind manager.",
+  "kinds": [
+    "bar-widget",
+    "panel"
+  ],
+  "keepLoaded": true,
+  "entryPoints": {
+    "barWidget": "Panel.qml",
+    "panel": "KeybindsPanel.qml"
+  },
+  "barWidget": {
+    "displayName": "Mouse & Keybind Settings",
+    "description": "Configure mouse, pointer, and keyboard shortcut settings.",
+    "category": "Hardware",
+    "allowMultiple": false,
+    "defaults": {
+      "showDeviceName": true
+    }
+  }
+}

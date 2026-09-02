@@ -36,12 +36,26 @@ Afterwards restart the shell to load the widget:
 omarchy restart shell
 ```
 
-Prerequisite for button simulation (optional):
+### Optional: synthetic button simulation (ydotool)
+
+The **button simulation** feature (test canvas / synthetic click) is **optional** and
+requires a separate, manual setup. It is not part of the base plugin installation and
+all mouse/keybind settings work without it. Missing `ydotool` disables only the
+simulate action — the plugin reports `ydotool not installed` and does nothing else.
+
+Set it up only if you want the synthetic-click helper:
 
 ```bash
+# 1. Install the package (requires sudo, only needed if you want simulation)
 sudo pacman -S ydotool
+
+# 2. Activate the per-user service
 systemctl --user enable --now ydotool.service
 ```
+
+Afterwards, the toolbar **Test Canvas** and the `simulate-button` CLI command emit
+synthetic clicks. If the socket is unavailable the plugin reports `ydotoold
+unavailable` — restart the service to re-enable it.
 
 ## Usage
 

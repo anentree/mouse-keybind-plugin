@@ -1582,6 +1582,7 @@ Panel {
             id: kbSearchInput
             Layout.fillWidth: true
             Layout.preferredHeight: Style.space(36)
+            maximumLength: 256
             placeholderText: "Search shortcuts, actions, commands..."
             text: root.kbSearchQuery
             onTextChanged: root.kbSearchQuery = text

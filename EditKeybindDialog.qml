@@ -328,6 +328,7 @@ Item {
           TextField {
             id: descInput
             Layout.fillWidth: true
+            maximumLength: 200
             text: root.actionTitle
             placeholderText: "e.g. Launch Terminal, Toggle Fullscreen, My Script"
             onTextChanged: root.actionTitle = text
@@ -351,6 +352,7 @@ Item {
           TextField {
             id: cmdInput
             Layout.fillWidth: true
+            maximumLength: 2000
             text: root.actionCommand
             placeholderText: "e.g. alacritty -e btop, omarchy-capture-screenshot"
             onTextChanged: root.actionCommand = text

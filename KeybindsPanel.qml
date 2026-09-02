@@ -493,6 +493,7 @@ Item {
             TextField {
               id: searchInput
               anchors.fill: parent
+              maximumLength: 256
               placeholderText: root.recordingSearch
                 ? "Listening... Press any shortcut combination (e.g. CTRL + O)"
                 : "Search shortcuts, actions, commands..."

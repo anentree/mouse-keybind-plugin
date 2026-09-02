@@ -16,11 +16,18 @@ import math
 import os
 import re
 import shutil
+import signal
+import stat
 import subprocess
 import sys
 import tempfile
 from contextlib import contextmanager
 from pathlib import Path
+
+MAX_SUBPROCESS_TIMEOUT = 15
+MAX_SUBPROCESS_OUTPUT = 1_048_576  # retained bytes per captured stream
+MAX_JSON_INPUT_BYTES = 1_048_576
+MAX_CONFIG_READ_BYTES = 1_048_576
 
 INPUT_LUA_PATH = Path.home() / ".config" / "hypr" / "input.lua"
 BINDINGS_LUA_PATH = Path.home() / ".config" / "hypr" / "bindings.lua"
@@ -58,47 +65,191 @@ SIMULATE_BUTTON_CODES = {
     "side_forward": "0xC4"
 }
 
+def _open_dir_fd(path: Path) -> int:
+    """Open a directory file descriptor for the parent of a target config file,
+    refusing to follow a symlinked final directory and requiring that the final
+    directory is real and owned by the user. Ancestors only need to be real
+    directories on the way to it."""
+    parent = path.parent
+    if not parent.exists():
+        parent.mkdir(parents=True, exist_ok=True)
+    # Verify the ancestor chain resolves through real directories.
+    parts = [Path("/")] + [Path(p) for p in parent.parts[1:]]
+    for comp in parts[:-1]:
+        if not comp.exists():
+            break
+        if not stat.S_ISDIR(os.stat(comp).st_mode):
+            raise ValueError(f"refusing non-directory config component: {comp}")
+    # The final parent must be a real directory owned by the user.
+    try:
+        st = os.stat(parent)
+    except OSError as e:
+        raise ValueError(f"cannot stat config directory: {parent} ({e})") from e
+    if not stat.S_ISDIR(st.st_mode):
+        raise ValueError(f"refusing non-directory config parent: {parent}")
+    if st.st_uid != os.geteuid():
+        raise ValueError(f"refusing config directory not owned by user: {parent}")
+    # Open it no-follow so a symlink swap at the final hop is rejected.
+    try:
+        return os.open(str(parent), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    except OSError as e:
+        raise ValueError(f"cannot open config directory safely: {parent} ({e})") from e
+
+
+def _safe_stat(path: Path):
+    """Return an fstat of path opened no-follow, insisting on a regular file to
+    which the effective user owns. Raises ValueError on any unsafe condition."""
+    try:
+        fd = os.open(str(path), os.O_RDONLY | os.O_NOFOLLOW)
+    except FileNotFoundError:
+        raise FileNotFoundError(str(path)) from None
+    except OSError as e:
+        raise ValueError(f"refusing non-regular/symlink path: {path} ({e})") from e
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            raise ValueError(f"refusing non-regular file: {path}")
+        if st.st_uid != os.geteuid():
+            raise ValueError(f"refusing file not owned by user: {path}")
+        return fd, st
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+def safe_read_file(path: Path, max_bytes: int = MAX_CONFIG_READ_BYTES) -> str:
+    """Read a config file with size, regular-file, owner, no-follow and
+    safe-parent checks. Raises ValueError/FileNotFoundError on unsafe conditions."""
+    if not path.parent.is_dir():
+        if not path.exists():
+            raise FileNotFoundError(str(path))
+    fd, st = _safe_stat(path)
+    try:
+        if st.st_size > max_bytes:
+            raise ValueError(f"refusing oversized config file: {path} ({st.st_size} bytes)")
+        with os.fdopen(fd, "r", encoding="utf-8") as f:
+            content = f.read(max_bytes)
+        if len(content.encode("utf-8")) > max_bytes:
+            raise ValueError(f"refusing oversized config file: {path}")
+        return content
+    except BaseException:
+        raise
+
+
+def _lock_fd(fd: int):
+    """Acquire an exclusive advisory lock on the given file descriptor."""
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+    except OSError as e:
+        raise RuntimeError(f"failed to acquire config lock: {e}") from e
+
+
+def _unlock_fd(fd: int):
+    try:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+    except OSError as e:
+        raise RuntimeError(f"failed to release config lock: {e}") from e
+
+
 @contextmanager
 def file_lock():
-    """Acquires an exclusive lock across read-modify-write operations to prevent races."""
+    """Acquires an exclusive lock across read-modify-write operations to prevent
+    races. Fail-closed: any lock or path error aborts the operation."""
     LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
+    lock_dir_fd = _open_dir_fd(LOCK_PATH)
+    lock_ref = os.path.join("/proc/self/fd", str(lock_dir_fd), LOCK_PATH.name)
     try:
-        with open(LOCK_PATH, "w") as lock_file:
-            fcntl.flock(lock_file, fcntl.LOCK_EX)
-            try:
-                yield
-            finally:
-                try:
-                    fcntl.flock(lock_file, fcntl.LOCK_UN)
-                except Exception:
-                    pass
+        lock_fd = os.open(lock_ref, os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    except OSError as e:
+        os.close(lock_dir_fd)
+        raise RuntimeError(f"cannot open lock file safely: {LOCK_PATH} ({e})") from e
+    try:
+        lock_stat = os.fstat(lock_fd)
+        if not stat.S_ISREG(lock_stat.st_mode) or lock_stat.st_uid != os.geteuid():
+            raise RuntimeError(f"lock file is not a user-regular file: {LOCK_PATH}")
+        _lock_fd(lock_fd)
     except Exception:
+        os.close(lock_fd)
+        os.close(lock_dir_fd)
+        raise
+    try:
         yield
+    finally:
+        try:
+            _unlock_fd(lock_fd)
+        finally:
+            os.close(lock_fd)
+            os.close(lock_dir_fd)
+
 
 def safe_atomic_write(target_path: Path, content: str) -> bool:
+    """Atomically replace target_path with content, refusing symlinks and
+    verifying the parent directory descriptor, using rename-by-dirfd so no
+    check-then-unlink window exists."""
     try:
-        target_path.parent.mkdir(parents=True, exist_ok=True)
-        if target_path.is_symlink():
-            target_path.unlink()
-
-        fd, tmp_path = tempfile.mkstemp(
-            dir=str(target_path.parent),
+        parent_dir_fd = _open_dir_fd(target_path)
+        parent_fd = os.dup(parent_dir_fd)
+        os.close(parent_dir_fd)
+    except ValueError:
+        return False
+    tmp_name = None
+    try:
+        fd, tmp_name = tempfile.mkstemp(
+            dir="/proc/self/fd/" + str(parent_fd),
             prefix=f"{target_path.name}.",
-            suffix=".tmp"
+            suffix=".tmp",
         )
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as f:
                 f.write(content)
                 f.flush()
                 os.fsync(f.fileno())
-            os.replace(tmp_path, str(target_path))
+            replacement_ref = os.path.join("/proc/self/fd", str(parent_fd), os.path.basename(tmp_name))
+            os.replace(replacement_ref, os.path.join("/proc/self/fd", str(parent_fd), target_path.name))
             return True
         except Exception:
-            if os.path.exists(tmp_path):
-                os.unlink(tmp_path)
+            try:
+                if tmp_name:
+                    os.unlink(tmp_name)
+            except OSError:
+                pass
             return False
-    except Exception:
-        return False
+    finally:
+        os.close(parent_fd)
+
+
+def run_cmd(cmd) -> tuple:
+    """Run a command with a hard timeout, retained-output byte limit and
+    process-group cleanup so no child survives a timeout or crash."""
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            start_new_session=True,
+        )
+        try:
+            out, err = proc.communicate(timeout=MAX_SUBPROCESS_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(proc.pid, signal.SIGTERM)
+            except OSError:
+                pass
+            try:
+                proc.communicate(timeout=2)
+            except Exception:
+                pass
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except OSError:
+                pass
+            proc.wait()
+            return 1, "", "command timed out"
+        code = proc.returncode
+        return code, (out or "")[:MAX_SUBPROCESS_OUTPUT], (err or "")[:MAX_SUBPROCESS_OUTPUT]
+    except Exception as e:
+        return 1, "", str(e)
 
 def validate_float(val, default: float, min_val: float, max_val: float) -> float:
     try:
@@ -112,7 +263,7 @@ def validate_float(val, default: float, min_val: float, max_val: float) -> float
 def validate_int(val, default: int, min_val: int, max_val: int) -> int:
     try:
         v = int(val)
-        return max(min_val, max(max_val, v))
+        return max(min_val, min(max_val, v))
     except (TypeError, ValueError, OverflowError):
         return default
 
@@ -223,7 +374,7 @@ def read_saved_input_settings():
     if not INPUT_LUA_PATH.exists():
         return settings
     try:
-        content = INPUT_LUA_PATH.read_text(encoding="utf-8")
+        content = safe_read_file(INPUT_LUA_PATH)
         if START_MARKER in content and END_MARKER in content:
             block = content.split(START_MARKER)[1].split(END_MARKER)[0]
             sens_match = re.search(r"sensitivity\s*=\s*([-+]?[0-9]*\.?[0-9]+)", block)
@@ -256,7 +407,7 @@ def read_saved_button_mappings():
     if not BINDINGS_LUA_PATH.exists():
         return mappings
     try:
-        content = BINDINGS_LUA_PATH.read_text(encoding="utf-8")
+        content = safe_read_file(BINDINGS_LUA_PATH)
         if BINDINGS_START_MARKER in content and BINDINGS_END_MARKER in content:
             block = content.split(BINDINGS_START_MARKER)[1].split(BINDINGS_END_MARKER)[0]
             if 'o.bind("mouse:275", "Previous workspace"' in block:
@@ -351,7 +502,7 @@ def persist_to_input_lua(settings) -> bool:
         original_content = "-- User input overrides\n"
     else:
         try:
-            original_content = INPUT_LUA_PATH.read_text(encoding="utf-8")
+            original_content = safe_read_file(INPUT_LUA_PATH)
         except Exception:
             original_content = ""
     sensitivity = validate_float(settings.get("sensitivity"), 0.0, -1.0, 1.0)
@@ -384,14 +535,16 @@ def persist_to_input_lua(settings) -> bool:
         updated_content = original_content.rstrip() + "\n\n" + new_block + "\n"
     if updated_content == original_content:
         return False
-    return safe_atomic_write(INPUT_LUA_PATH, updated_content)
+    if not safe_atomic_write(INPUT_LUA_PATH, updated_content):
+        raise RuntimeError(f"failed to write config safely: {INPUT_LUA_PATH}")
+    return True
 
 def persist_to_bindings_lua(mappings) -> bool:
     if not BINDINGS_LUA_PATH.exists():
         original_content = "-- User keybinding overrides\n"
     else:
         try:
-            original_content = BINDINGS_LUA_PATH.read_text(encoding="utf-8")
+            original_content = safe_read_file(BINDINGS_LUA_PATH)
         except Exception:
             original_content = ""
     lines = []
@@ -445,7 +598,9 @@ def persist_to_bindings_lua(mappings) -> bool:
         updated_content = original_content.rstrip() + "\n\n" + new_block + "\n"
     if updated_content == original_content:
         return False
-    return safe_atomic_write(BINDINGS_LUA_PATH, updated_content)
+    if not safe_atomic_write(BINDINGS_LUA_PATH, updated_content):
+        raise RuntimeError(f"failed to write config safely: {BINDINGS_LUA_PATH}")
+    return True
 
 def notify_user(title, message, icon="input-mouse"):
     run_cmd(["notify-send", "-a", "Omarchy", "-i", icon, str(title), str(message)])
@@ -532,6 +687,9 @@ def main():
             has_input_change = False
             has_bindings_change = False
             if args.json_data:
+                if len(args.json_data.encode("utf-8")) > MAX_JSON_INPUT_BYTES:
+                    print(json.dumps({"success": False, "error": "JSON payload too large"}))
+                    return
                 try:
                     payload = json.loads(args.json_data)
                     if not isinstance(payload, dict):
@@ -560,8 +718,12 @@ def main():
                         current["mouse_refocus"] = validate_bool(payload["mouse_refocus"], current["mouse_refocus"])
                         has_input_change = True
                     if "button_mappings" in payload and isinstance(payload["button_mappings"], dict):
-                        for btn, act in payload["button_mappings"].items():
-                            if btn in ALLOWED_BUTTON_ACTIONS:
+                        bm = payload["button_mappings"]
+                        if len(bm) > 64:
+                            print(json.dumps({"success": False, "error": "button_mappings collection too large"}))
+                            return
+                        for btn, act in bm.items():
+                            if btn in ALLOWED_BUTTON_ACTIONS and isinstance(act, str) and len(act) <= 64:
                                 current["button_mappings"][btn] = validate_button_mapping(btn, act)
                         has_bindings_change = True
                 except Exception as e:
@@ -584,4 +746,8 @@ def main():
             return
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except (RuntimeError, ValueError, OSError) as e:
+        print(json.dumps({"success": False, "error": str(e)}))
+        sys.exit(1)

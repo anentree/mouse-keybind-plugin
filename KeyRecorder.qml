@@ -442,6 +442,7 @@ Item {
       TextField {
         id: manualKeyField
         Layout.preferredWidth: Style.space(110)
+        maximumLength: 64
         text: root.mainKey
         placeholderText: "e.g. A, TAB"
         onTextChanged: {

@@ -9,6 +9,7 @@ import sys
 import re
 import json
 import shutil
+import signal
 import subprocess
 from datetime import datetime
 from pathlib import Path
@@ -27,6 +28,63 @@ MAX_CMD_LEN = 2000
 MAX_FILE_BYTES = 65_536
 MAX_DIR_FILES = 256
 MAX_TOTAL_READ = 2_097_152
+MAX_SUBPROCESS_TIMEOUT = 15
+MAX_SUBPROCESS_OUTPUT = 1_048_576
+
+def run_cmd(cmd) -> tuple:
+    """Run a command with a hard timeout, retained-output byte limit and
+    process-group cleanup so no child survives a timeout or crash."""
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            start_new_session=True,
+        )
+        try:
+            out, err = proc.communicate(timeout=MAX_SUBPROCESS_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(proc.pid, signal.SIGTERM)
+            except OSError:
+                pass
+            try:
+                proc.communicate(timeout=2)
+            except Exception:
+                pass
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except OSError:
+                pass
+            proc.wait()
+            return None, None, None
+        code = proc.returncode
+        return code, (out or "")[:MAX_SUBPROCESS_OUTPUT], (err or "")[:MAX_SUBPROCESS_OUTPUT]
+    except Exception:
+        return None, None, None
+
+
+def safe_open_config(path, *, owner_check=True, max_bytes=MAX_FILE_BYTES):
+    """Open a config file with no-follow, regular-file and (optionally) owner
+    checks, returning (fd, size). Raises on unsafe conditions."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    except FileNotFoundError:
+        raise
+    except OSError as e:
+        raise ValueError(f"refusing non-regular/symlink path: {path} ({e})") from e
+    st = os.fstat(fd)
+    if not stat.S_ISREG(st.st_mode):
+        os.close(fd)
+        raise ValueError(f"refusing non-regular file: {path}")
+    if owner_check and st.st_uid != os.geteuid():
+        os.close(fd)
+        raise ValueError(f"refusing file not owned by user: {path}")
+    if st.st_size > max_bytes:
+        os.close(fd)
+        raise ValueError(f"refusing oversized config file: {path}")
+    return fd, st.st_size
 
 def sanitize_lua_str(s: str) -> str:
     s = (s or "").replace("\r", " ").replace("\n", " ")
@@ -196,17 +254,17 @@ def normalize_key_chord(key_chord: str) -> str:
 def get_mouse_scroll_settings():
     settings = {"natural_scroll": False, "scroll_factor": 1.0}
     try:
-        res = subprocess.run(["hyprctl", "getoption", "input:scroll_factor", "-j"], capture_output=True, text=True, timeout=10)
-        if res.returncode == 0:
-            data = json.loads(res.stdout)
+        code, outp, _ = run_cmd(["hyprctl", "getoption", "input:scroll_factor", "-j"])
+        if code == 0 and outp:
+            data = json.loads(outp)
             if "float" in data:
                 settings["scroll_factor"] = float(data["float"])
     except Exception:
         pass
     try:
-        res = subprocess.run(["hyprctl", "getoption", "input:natural_scroll", "-j"], capture_output=True, text=True, timeout=10)
-        if res.returncode == 0:
-            data = json.loads(res.stdout)
+        code, outp, _ = run_cmd(["hyprctl", "getoption", "input:natural_scroll", "-j"])
+        if code == 0 and outp:
+            data = json.loads(outp)
             if "bool" in data:
                 settings["natural_scroll"] = bool(data["bool"])
     except Exception:
@@ -227,7 +285,8 @@ def parse_default_bindings():
             continue
         filepath = os.path.join(DEFAULT_BINDINGS_DIR, fname)
         try:
-            with open(filepath, "r", encoding="utf-8") as f:
+            src_fd, _ = safe_open_config(filepath, owner_check=False)
+            with os.fdopen(src_fd, "r", encoding="utf-8") as f:
                 content = f.read(MAX_FILE_BYTES)
             total_read += len(content.encode("utf-8"))
         except Exception:
@@ -281,7 +340,8 @@ def parse_user_bindings():
     if not os.path.isfile(USER_BINDINGS_PATH):
         return result
     try:
-        with open(USER_BINDINGS_PATH, "r", encoding="utf-8") as f:
+        src_fd, _ = safe_open_config(USER_BINDINGS_PATH, owner_check=True)
+        with os.fdopen(src_fd, "r", encoding="utf-8") as f:
             content = f.read(MAX_FILE_BYTES)
             result["raw_content"] = content
     except Exception:
@@ -531,22 +591,21 @@ def write_user_bindings(lines_to_add=None, unbinds_to_add=None, keys_to_remove=N
         raise
 
 def reload_hyprland():
-    try:
-        res = subprocess.run(["hyprctl", "reload"], capture_output=True, text=True, timeout=10)
-        err_res = subprocess.run(["hyprctl", "configerrors"], capture_output=True, text=True, timeout=10)
-        return {
-            "success": res.returncode == 0,
-            "reload_output": res.stdout.strip(),
-            "config_errors": err_res.stdout.strip() if err_res.returncode == 0 else "",
-        }
-    except Exception as e:
-        return {"success": False, "error": str(e)}
+    code, reload_out, _ = run_cmd(["hyprctl", "reload"])
+    code2, cfg_out, _ = run_cmd(["hyprctl", "configerrors"])
+    return {
+        "success": code == 0,
+        "reload_output": (reload_out or "").strip(),
+        "config_errors": (cfg_out or "").strip() if code2 == 0 else "",
+    }
 
 def set_keybinding(key: str, description: str, command: str, action: str = "", old_key: str = "", override_conflicts: bool = True):
     norm_key = normalize_key_chord(key)
     norm_old_key = normalize_key_chord(old_key) if old_key else ""
     if not norm_key:
         return {"success": False, "error": "Invalid key combination"}
+    if len(description or "") > MAX_TEXT_LEN or len(command or "") > MAX_CMD_LEN or len(action or "") > MAX_CMD_LEN:
+        return {"success": False, "error": "Description or command exceeds allowed length"}
     default_binds = parse_default_bindings()
     keys_to_clean = [norm_key]
     unbinds_to_add = []

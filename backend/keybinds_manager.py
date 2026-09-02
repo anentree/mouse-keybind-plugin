@@ -10,11 +10,13 @@ import re
 import json
 import shutil
 import signal
+import select
+import stat
+import errno
 import subprocess
+import time
 from datetime import datetime
 from pathlib import Path
-import tempfile
-import stat
 
 DEFAULT_BINDINGS_DIR = os.environ.get("OMARCHY_PATH", "/usr/share/omarchy") + "/default/hypr/bindings"
 USER_BINDINGS_PATH = os.path.expanduser("~/.config/hypr/bindings.lua")
@@ -32,59 +34,185 @@ MAX_SUBPROCESS_TIMEOUT = 15
 MAX_SUBPROCESS_OUTPUT = 1_048_576
 
 def run_cmd(cmd) -> tuple:
-    """Run a command with a hard timeout, retained-output byte limit and
-    process-group cleanup so no child survives a timeout or crash."""
+    """Run a command with:
+      - a hard wall-clock timeout,
+      - a hard aggregate stdout+stderr byte ceiling enforced *while streaming*
+        (not after the process exits), and
+      - whole-process-group cleanup (SIGTERM -> SIGKILL + reap) on both
+        overflow and timeout, so no child survives.
+    Returns (returncode, bounded_stdout, bounded_stderr); on timeout or overflow
+    the code is None to signal the failure."""
     try:
         proc = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            text=True,
             start_new_session=True,
         )
-        try:
-            out, err = proc.communicate(timeout=MAX_SUBPROCESS_TIMEOUT)
-        except subprocess.TimeoutExpired:
-            try:
-                os.killpg(proc.pid, signal.SIGTERM)
-            except OSError:
-                pass
-            try:
-                proc.communicate(timeout=2)
-            except Exception:
-                pass
-            try:
-                os.killpg(proc.pid, signal.SIGKILL)
-            except OSError:
-                pass
-            proc.wait()
-            return None, None, None
-        code = proc.returncode
-        return code, (out or "")[:MAX_SUBPROCESS_OUTPUT], (err or "")[:MAX_SUBPROCESS_OUTPUT]
     except Exception:
-        return None, None, None
+        return None, "", ""
+    out = bytearray()
+    err = bytearray()
+    total = 0
+    overflow = False
+    timed_out = False
+    deadline = time.monotonic() + MAX_SUBPROCESS_TIMEOUT
+    try:
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                timed_out = True
+                break
+            fds = [fd for fd in (proc.stdout, proc.stderr) if fd is not None and not fd.closed]
+            if not fds:
+                break
+            rlist, _, _ = select.select(fds, [], [], min(remaining, 0.2))
+            for fd in rlist:
+                data = os.read(fd.fileno(), 8192)
+                if not data:
+                    fd.close()
+                    continue
+                if total + len(data) > MAX_SUBPROCESS_OUTPUT:
+                    overflow = True
+                    continue
+                total += len(data)
+                if fd is proc.stdout:
+                    out += data
+                else:
+                    err += data
+            if overflow:
+                break
+        if timed_out or overflow:
+            _kill_and_reap(proc)
+            return None, _decode(out), _decode(err)
+        code = proc.wait()
+        return code, _decode(out), _decode(err)
+    except Exception:
+        _kill_and_reap(proc)
+        return None, _decode(out), _decode(err)
+
+
+def _kill_and_reap(proc):
+    try:
+        os.killpg(proc.pid, signal.SIGTERM)
+    except (ProcessLookupError, PermissionError, OSError):
+        pass
+    try:
+        proc.wait(timeout=2)
+        return
+    except subprocess.TimeoutExpired:
+        pass
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError, OSError):
+        pass
+    try:
+        proc.wait(timeout=2)
+    except subprocess.TimeoutExpired:
+        try:
+            proc.wait()
+        except Exception:
+            pass
+
+
+def _decode(data: bytearray) -> str:
+    return bytes(data).decode("utf-8", errors="replace").strip()
+
+
+def _parent_dir_fd(path):
+    """Open path's parent directory via component-wise descriptor-relative
+    traversal: every component is opened with openat(..., O_DIRECTORY|O_NOFOLLOW)
+    relative to the previously retained dirfd, walking from '/'. No pathname is
+    ever followed, so a symlink substitution at any ancestor is rejected."""
+    p = Path(path)
+    if not p.is_absolute():
+        raise ValueError(f"expected absolute path: {path}")
+    parent = p.parent
+    comps = parent.parts[1:]  # drop the leading root component
+    fd = os.open("/", os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        for comp in comps:
+            nfd = os.open(comp, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+            os.close(fd)
+            fd = nfd
+            if not stat.S_ISDIR(os.fstat(fd).st_mode):
+                raise ValueError(f"refusing non-directory component: {comp}")
+        return fd
+    except FileNotFoundError:
+        os.close(fd)
+        raise
+    except OSError as e:
+        os.close(fd)
+        raise ValueError(f"cannot traverse path: {path} ({e})") from e
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+def _open_dir_fd(path):
+    """Open path itself as a directory via descriptor-relative O_NOFOLLOW walk.
+    Raises FileNotFoundError if the directory is absent and ValueError on any
+    unsafe component."""
+    p = Path(path)
+    comps = p.parts[1:]
+    fd = os.open("/", os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        for comp in comps:
+            nfd = os.open(comp, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+            os.close(fd)
+            fd = nfd
+            if not stat.S_ISDIR(os.fstat(fd).st_mode):
+                raise ValueError(f"refusing non-directory component: {comp}")
+        return fd
+    except FileNotFoundError:
+        os.close(fd)
+        raise
+    except OSError as e:
+        os.close(fd)
+        raise ValueError(f"cannot open directory safely: {path} ({e})") from e
+    except BaseException:
+        os.close(fd)
+        raise
 
 
 def safe_open_config(path, *, owner_check=True, max_bytes=MAX_FILE_BYTES):
-    """Open a config file with no-follow, regular-file and (optionally) owner
-    checks, returning (fd, size). Raises on unsafe conditions."""
+    """Open a config file relative to its descriptor-verified parent dirfd with
+    no-follow, regular-file and (optionally) owner checks, returning
+    (fd, size). Raises FileNotFoundError when genuinely absent and ValueError
+    on unsafe conditions."""
+    p = Path(path)
+    parent_fd = _parent_dir_fd(path)
     try:
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
-    except FileNotFoundError:
-        raise
-    except OSError as e:
-        raise ValueError(f"refusing non-regular/symlink path: {path} ({e})") from e
-    st = os.fstat(fd)
-    if not stat.S_ISREG(st.st_mode):
-        os.close(fd)
-        raise ValueError(f"refusing non-regular file: {path}")
-    if owner_check and st.st_uid != os.geteuid():
-        os.close(fd)
-        raise ValueError(f"refusing file not owned by user: {path}")
-    if st.st_size > max_bytes:
-        os.close(fd)
-        raise ValueError(f"refusing oversized config file: {path}")
-    return fd, st.st_size
+        try:
+            fd = os.open(p.name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=parent_fd)
+        except FileNotFoundError:
+            raise
+        except IsADirectoryError:
+            raise ValueError(f"refusing directory where file expected: {path}")
+        except OSError as e:
+            raise ValueError(f"refusing non-regular/symlink path: {path} ({e})") from e
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            os.close(fd)
+            raise ValueError(f"refusing non-regular file: {path}")
+        if owner_check and st.st_uid != os.geteuid():
+            os.close(fd)
+            raise ValueError(f"refusing file not owned by user: {path}")
+        if st.st_size > max_bytes:
+            os.close(fd)
+            raise ValueError(f"refusing oversized config file: {path}")
+        return fd, st.st_size
+    finally:
+        os.close(parent_fd)
+
+
+def _read_fd_capped(fd, max_bytes):
+    """Read up to max_bytes+1 from the current fd offset, raising ValueError
+    (cap+1 overflow rejection) if the file exceeds the limit."""
+    raw = os.read(fd, max_bytes + 1)
+    if len(raw) > max_bytes:
+        raise ValueError("config file exceeds size limit")
+    return raw.decode("utf-8")
 
 def sanitize_lua_str(s: str) -> str:
     s = (s or "").replace("\r", " ").replace("\n", " ")
@@ -273,61 +401,73 @@ def get_mouse_scroll_settings():
 
 def parse_default_bindings():
     bindings = []
-    if not os.path.isdir(DEFAULT_BINDINGS_DIR):
+    try:
+        dirfd = _open_dir_fd(DEFAULT_BINDINGS_DIR)
+    except (FileNotFoundError, ValueError):
         return bindings
-    file_count = 0
-    total_read = 0
-    for fname in sorted(os.listdir(DEFAULT_BINDINGS_DIR)):
-        if file_count >= MAX_DIR_FILES or total_read > MAX_TOTAL_READ:
-            break
-        file_count += 1
-        if not fname.endswith(".lua"):
-            continue
-        filepath = os.path.join(DEFAULT_BINDINGS_DIR, fname)
-        try:
-            src_fd, _ = safe_open_config(filepath, owner_check=False)
-            with os.fdopen(src_fd, "r", encoding="utf-8") as f:
-                content = f.read(MAX_FILE_BYTES)
+    try:
+        names = sorted(e.name for e in os.scandir(dirfd))
+        file_count = 0
+        total_read = 0
+        for fname in names:
+            if file_count >= MAX_DIR_FILES or total_read > MAX_TOTAL_READ:
+                break
+            file_count += 1
+            if not fname.endswith(".lua"):
+                continue
+            try:
+                src_fd = os.open(fname, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=dirfd)
+            except OSError:
+                continue
+            try:
+                st = os.fstat(src_fd)
+                if not stat.S_ISREG(st.st_mode) or st.st_size > MAX_FILE_BYTES:
+                    continue
+                content = _read_fd_capped(src_fd, MAX_FILE_BYTES)
+            except Exception:
+                continue
+            finally:
+                os.close(src_fd)
             total_read += len(content.encode("utf-8"))
-        except Exception:
-            continue
-        for line in content.splitlines():
-            stripped = line.strip()
-            if stripped.startswith('--'):
-                continue
-            parsed = _parse_bind_line(stripped)
-            if not parsed:
-                continue
-            raw_key, desc, action_raw, opts_raw = parsed
-            norm_key = normalize_key_chord(raw_key)
-            if not desc:
-                desc = action_raw.strip('"\'')
-            cat = "General"
-            base = fname.replace(".lua", "")
-            if base == "applications":
-                cat = "Applications"
-            elif base == "tiling":
-                cat = "Window Management"
-            elif base == "media":
-                cat = "Media & Audio"
-            elif base == "utilities":
-                cat = "Menus & System"
-            elif base == "clipboard":
-                cat = "Clipboard"
-            elif base == "voxtype":
-                cat = "AI & Voice"
-            is_release = opts_raw and ("on_release = true" in opts_raw or "on_release=true" in opts_raw)
-            bindings.append({
-                "source": "default",
-                "file": fname,
-                "key": norm_key,
-                "raw_key": raw_key,
-                "description": desc,
-                "action": action_raw,
-                "category": cat,
-                "is_mouse": "mouse" in raw_key.lower() or "mouse" in (opts_raw or ""),
-                "is_release": is_release,
-            })
+            for line in content.splitlines():
+                stripped = line.strip()
+                if stripped.startswith('--'):
+                    continue
+                parsed = _parse_bind_line(stripped)
+                if not parsed:
+                    continue
+                raw_key, desc, action_raw, opts_raw = parsed
+                norm_key = normalize_key_chord(raw_key)
+                if not desc:
+                    desc = action_raw.strip('"\'')
+                cat = "General"
+                base = fname.replace(".lua", "")
+                if base == "applications":
+                    cat = "Applications"
+                elif base == "tiling":
+                    cat = "Window Management"
+                elif base == "media":
+                    cat = "Media & Audio"
+                elif base == "utilities":
+                    cat = "Menus & System"
+                elif base == "clipboard":
+                    cat = "Clipboard"
+                elif base == "voxtype":
+                    cat = "AI & Voice"
+                is_release = opts_raw and ("on_release = true" in opts_raw or "on_release=true" in opts_raw)
+                bindings.append({
+                    "source": "default",
+                    "file": fname,
+                    "key": norm_key,
+                    "raw_key": raw_key,
+                    "description": desc,
+                    "action": action_raw,
+                    "category": cat,
+                    "is_mouse": "mouse" in raw_key.lower() or "mouse" in (opts_raw or ""),
+                    "is_release": is_release,
+                })
+    finally:
+        os.close(dirfd)
     return bindings
 
 def parse_user_bindings():
@@ -337,15 +477,15 @@ def parse_user_bindings():
         "binds": [],
         "mouse_binds": [],
     }
-    if not os.path.isfile(USER_BINDINGS_PATH):
-        return result
     try:
         src_fd, _ = safe_open_config(USER_BINDINGS_PATH, owner_check=True)
-        with os.fdopen(src_fd, "r", encoding="utf-8") as f:
-            content = f.read(MAX_FILE_BYTES)
-            result["raw_content"] = content
-    except Exception:
+    except FileNotFoundError:
         return result
+    try:
+        content = _read_fd_capped(src_fd, MAX_FILE_BYTES)
+    finally:
+        os.close(src_fd)
+    result["raw_content"] = content
     for line in content.splitlines():
         stripped = line.strip()
         if stripped.startswith("--"):
@@ -483,112 +623,104 @@ def build_complete_model():
     }
 
 def write_user_bindings(lines_to_add=None, unbinds_to_add=None, keys_to_remove=None):
-    cfg_dir = os.path.dirname(USER_BINDINGS_PATH)
-    os.makedirs(cfg_dir, exist_ok=True)
-    existing_content = ""
+    name = Path(USER_BINDINGS_PATH).name
+    parent_fd = _parent_dir_fd(USER_BINDINGS_PATH)
     try:
-        src_fd = os.open(USER_BINDINGS_PATH, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-    except FileNotFoundError:
-        src_fd = None
-    except OSError:
-        raise ValueError(f"refusing to operate on non-regular/symlink path: {USER_BINDINGS_PATH}")
-    if src_fd is not None:
+        existing_content = ""
+        prior_mode = 0o600
         try:
-            if not stat.S_ISREG(os.fstat(src_fd).st_mode):
-                os.close(src_fd)
-                raise ValueError(f"refusing non-regular file: {USER_BINDINGS_PATH}")
-            with os.fdopen(src_fd, "r", encoding="utf-8") as f:
-                existing_content = f.read(MAX_FILE_BYTES)
-        except BaseException:
-            raise
-        backup_path = USER_BINDINGS_PATH + ".bak"
-        bak_fd, bak_tmp = tempfile.mkstemp(dir=cfg_dir, prefix=".bindings_", suffix=".bak.tmp")
-        try:
-            with os.fdopen(bak_fd, "w", encoding="utf-8") as bak_f:
-                bak_f.write(existing_content)
-                bak_f.flush()
-                os.fsync(bak_f.fileno())
-            os.replace(bak_tmp, backup_path)
-        except BaseException:
-            if os.path.exists(bak_tmp):
-                try:
-                    os.unlink(bak_tmp)
-                except OSError:
-                    pass
-            raise
-    current_lines = existing_content.splitlines() if existing_content else []
-    if not current_lines:
-        current_lines = [
-            "-- Personal keybinding overrides for Omarchy Hyprland",
-            "-- Managed graphically by Mouse & Keybind Settings Plugin",
-            "",
-        ]
-    clean_keys = set(normalize_key_chord(k) for k in (keys_to_remove or []))
-    new_lines = []
-    for line in current_lines:
-        stripped = line.strip()
-        if stripped.startswith("--"):
-            new_lines.append(line)
-            continue
-        is_targeted = False
-        if clean_keys:
-            m_unbind = re.match(r'hl\.unbind\s*\(\s*["\']([^"\']+)["\']\s*\)', stripped)
-            if m_unbind and normalize_key_chord(m_unbind.group(1)) in clean_keys:
-                is_targeted = True
-            m_bind = re.match(r'o\.bind(?:_toggle)?\s*\(\s*["\']([^"\']+)["\']', stripped)
-            if m_bind and normalize_key_chord(m_bind.group(1)) in clean_keys:
-                is_targeted = True
-        if not is_targeted:
-            new_lines.append(line)
-    if unbinds_to_add:
-        for k in unbinds_to_add:
-            norm_k = normalize_key_chord(k)
-            line_str = f'hl.unbind("{norm_k}")'
-            if line_str not in new_lines:
-                new_lines.append(line_str)
-    if lines_to_add:
-        for entry in lines_to_add:
-            key = normalize_key_chord(entry.get("key", ""))
-            desc = sanitize_lua_str(entry.get("description", ""))
-            cmd = entry.get("command", "")
-            action = entry.get("action", "")
-            if action and (action.strip().startswith("{") or action.strip().startswith("hl.")):
-                new_lines.append(f'o.bind("{key}", "{desc}", {action.strip()[:MAX_CMD_LEN]})')
-            elif cmd and (cmd.strip().startswith("{") or cmd.strip().startswith("hl.")):
-                new_lines.append(f'o.bind("{key}", "{desc}", {cmd.strip()[:MAX_CMD_LEN]})')
-            else:
-                raw_cmd = (cmd or action).strip()
-                if (raw_cmd.startswith('"') and raw_cmd.endswith('"')) or (raw_cmd.startswith("'") and raw_cmd.endswith("'")):
-                    raw_cmd = raw_cmd[1:-1]
-                escaped_cmd = sanitize_lua_str(raw_cmd)
-                new_lines.append(f'o.bind("{key}", "{desc}", "{escaped_cmd}")')
-    final_output = []
-    prev_blank = False
-    for line in new_lines:
-        if not line.strip():
-            if not prev_blank:
-                final_output.append("")
-                prev_blank = True
-        else:
-            final_output.append(line)
-            prev_blank = False
-    fd, temp_file = tempfile.mkstemp(dir=cfg_dir, prefix=".bindings_", suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write("\n".join(final_output) + "\n")
-            f.flush()
-            os.fsync(f.fileno())
-        if os.path.islink(temp_file):
-            os.unlink(temp_file)
-            raise ValueError("temp write path is a symlink")
-        os.replace(temp_file, USER_BINDINGS_PATH)
-    except BaseException:
-        if os.path.exists(temp_file):
+            src_fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=parent_fd)
             try:
-                os.unlink(temp_file)
-            except BaseException:
+                st = os.fstat(src_fd)
+                if not stat.S_ISREG(st.st_mode):
+                    raise ValueError(f"refusing non-regular file: {USER_BINDINGS_PATH}")
+                prior_mode = stat.S_IMODE(st.st_mode)
+                existing_content = _read_fd_capped(src_fd, MAX_FILE_BYTES)
+            finally:
+                os.close(src_fd)
+        except FileNotFoundError:
+            pass
+
+        current_lines = existing_content.splitlines() if existing_content else []
+        if not current_lines:
+            current_lines = [
+                "-- Personal keybinding overrides for Omarchy Hyprland",
+                "-- Managed graphically by Mouse & Keybind Settings Plugin",
+                "",
+            ]
+        clean_keys = set(normalize_key_chord(k) for k in (keys_to_remove or []))
+        new_lines = []
+        for line in current_lines:
+            stripped = line.strip()
+            if stripped.startswith("--"):
+                new_lines.append(line)
+                continue
+            is_targeted = False
+            if clean_keys:
+                m_unbind = re.match(r'hl\.unbind\s*\(\s*["\']([^"\']+)["\']\s*\)', stripped)
+                if m_unbind and normalize_key_chord(m_unbind.group(1)) in clean_keys:
+                    is_targeted = True
+                m_bind = re.match(r'o\.bind(?:_toggle)?\s*\(\s*["\']([^"\']+)["\']', stripped)
+                if m_bind and normalize_key_chord(m_bind.group(1)) in clean_keys:
+                    is_targeted = True
+            if not is_targeted:
+                new_lines.append(line)
+        if unbinds_to_add:
+            for k in unbinds_to_add:
+                norm_k = normalize_key_chord(k)
+                line_str = f'hl.unbind("{norm_k}")'
+                if line_str not in new_lines:
+                    new_lines.append(line_str)
+        if lines_to_add:
+            for entry in lines_to_add:
+                key = normalize_key_chord(entry.get("key", ""))
+                desc = sanitize_lua_str(entry.get("description", ""))
+                cmd = entry.get("command", "")
+                action = entry.get("action", "")
+                if action and (action.strip().startswith("{") or action.strip().startswith("hl.")):
+                    new_lines.append(f'o.bind("{key}", "{desc}", {action.strip()[:MAX_CMD_LEN]})')
+                elif cmd and (cmd.strip().startswith("{") or cmd.strip().startswith("hl.")):
+                    new_lines.append(f'o.bind("{key}", "{desc}", {cmd.strip()[:MAX_CMD_LEN]})')
+                else:
+                    raw_cmd = (cmd or action).strip()
+                    if (raw_cmd.startswith('"') and raw_cmd.endswith('"')) or (raw_cmd.startswith("'") and raw_cmd.endswith("'")):
+                        raw_cmd = raw_cmd[1:-1]
+                    escaped_cmd = sanitize_lua_str(raw_cmd)
+                    new_lines.append(f'o.bind("{key}", "{desc}", "{escaped_cmd}")')
+        final_output = []
+        prev_blank = False
+        for line in new_lines:
+            if not line.strip():
+                if not prev_blank:
+                    final_output.append("")
+                    prev_blank = True
+            else:
+                final_output.append(line)
+                prev_blank = False
+        data = ("\n".join(final_output) + "\n").encode("utf-8")
+        tmp_name = f".{name}.{os.getpid()}.{os.urandom(4).hex}.tmp"
+        tmp_fd = os.open(tmp_name, os.O_WRONLY | os.O_CREAT | os.O_EXCL, prior_mode, dir_fd=parent_fd)
+        try:
+            wrote = 0
+            while wrote < len(data):
+                wrote += os.write(tmp_fd, data[wrote:])
+            os.fsync(tmp_fd)
+            os.close(tmp_fd)
+            tmp_fd = -1
+            os.replace(tmp_name, name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+        except BaseException:
+            try:
+                if tmp_fd != -1:
+                    os.close(tmp_fd)
+            except OSError:
                 pass
-        raise
+            try:
+                os.unlink(tmp_name, dir_fd=parent_fd)
+            except OSError:
+                pass
+            raise
+    finally:
+        os.close(parent_fd)
 
 def reload_hyprland():
     code, reload_out, _ = run_cmd(["hyprctl", "reload"])
@@ -597,6 +729,83 @@ def reload_hyprland():
         "success": code == 0,
         "reload_output": (reload_out or "").strip(),
         "config_errors": (cfg_out or "").strip() if code2 == 0 else "",
+    }
+
+
+def _snapshot_bindings():
+    """Capture (exists, raw_bytes, mode) of USER_BINDINGS_PATH for rollback, or
+    None if the file is genuinely absent. Raises (fails closed) on unsafety."""
+    try:
+        src_fd, _ = safe_open_config(USER_BINDINGS_PATH, owner_check=True)
+    except FileNotFoundError:
+        return None
+    try:
+        raw = os.read(src_fd, MAX_FILE_BYTES)
+        if len(raw) > MAX_FILE_BYTES:
+            raise ValueError("user bindings file exceeds size limit")
+        return (True, raw, stat.S_IMODE(os.fstat(src_fd).st_mode))
+    finally:
+        os.close(src_fd)
+
+
+def _restore_bindings(prior):
+    """Atomically restore USER_BINDINGS_PATH to a prior _snapshot_bindings()
+    result (exact bytes + mode). A prior of None removes the file if present."""
+    name = Path(USER_BINDINGS_PATH).name
+    parent_fd = _parent_dir_fd(USER_BINDINGS_PATH)
+    try:
+        if prior is None:
+            try:
+                os.unlink(name, dir_fd=parent_fd)
+            except FileNotFoundError:
+                pass
+            return
+        _, raw, mode = prior
+        tmp_name = f".{name}.{os.getpid()}.{os.urandom(4).hex}.tmp"
+        tmp_fd = os.open(tmp_name, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode, dir_fd=parent_fd)
+        try:
+            wrote = 0
+            while wrote < len(raw):
+                wrote += os.write(tmp_fd, raw[wrote:])
+            os.fsync(tmp_fd)
+            os.close(tmp_fd)
+            tmp_fd = -1
+            os.replace(tmp_name, name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+        except BaseException:
+            try:
+                if tmp_fd != -1:
+                    os.close(tmp_fd)
+            except OSError:
+                pass
+            try:
+                os.unlink(tmp_name, dir_fd=parent_fd)
+            except OSError:
+                pass
+            raise
+    finally:
+        os.close(parent_fd)
+
+
+def _verify_and_rollback(prior, key, old_key="", description=""):
+    """After a write, reload Hyprland and validate. If reload fails or Hyprland
+    reports config errors, atomically restore the exact prior file bytes + mode
+    and reload again, then report the failure with a rollback note."""
+    status = reload_hyprland()
+    if status.get("success") and not (status.get("config_errors") or "").strip():
+        return status
+    try:
+        _restore_bindings(prior)
+    except Exception:
+        pass
+    reload_hyprland()
+    err = (status.get("config_errors") or "config validation failed").strip()
+    return {
+        "success": False,
+        "key": key,
+        "old_key": old_key,
+        "description": description,
+        "reload": status,
+        "error": err + "; changes rolled back",
     }
 
 def set_keybinding(key: str, description: str, command: str, action: str = "", old_key: str = "", override_conflicts: bool = True):
@@ -621,14 +830,16 @@ def set_keybinding(key: str, description: str, command: str, action: str = "", o
         "command": command,
         "action": action,
     }]
+    prior = _snapshot_bindings()
     write_user_bindings(lines_to_add=binds, unbinds_to_add=unbinds_to_add, keys_to_remove=keys_to_clean)
-    reload_status = reload_hyprland()
+    status = _verify_and_rollback(prior, norm_key, norm_old_key, description or command)
     return {
-        "success": reload_status.get("success", False),
+        "success": status.get("success", False),
         "key": norm_key,
         "old_key": norm_old_key,
         "description": description,
-        "reload": reload_status,
+        "reload": status.get("reload"),
+        "error": status.get("error"),
     }
 
 def reset_keybinding(key: str, default_key: str = ""):
@@ -647,21 +858,24 @@ def reset_keybinding(key: str, default_key: str = ""):
             )
             if matched_default and matched_default["key"] not in keys_to_remove:
                 keys_to_remove.append(matched_default["key"])
+    prior = _snapshot_bindings()
     write_user_bindings(keys_to_remove=keys_to_remove)
-    reload_status = reload_hyprland()
-    return {"success": reload_status.get("success", False), "key": norm_key, "reload": reload_status}
+    status = _verify_and_rollback(prior, norm_key)
+    return {"success": status.get("success", False), "key": norm_key, "reload": status.get("reload"), "error": status.get("error")}
 
 def disable_keybinding(key: str):
     norm_key = normalize_key_chord(key)
+    prior = _snapshot_bindings()
     write_user_bindings(unbinds_to_add=[norm_key], keys_to_remove=[norm_key])
-    reload_status = reload_hyprland()
-    return {"success": reload_status.get("success", False), "key": norm_key, "reload": reload_status}
+    status = _verify_and_rollback(prior, norm_key)
+    return {"success": status.get("success", False), "key": norm_key, "reload": status.get("reload"), "error": status.get("error")}
 
 def enable_keybinding(key: str):
     norm_key = normalize_key_chord(key)
+    prior = _snapshot_bindings()
     write_user_bindings(keys_to_remove=[norm_key])
-    reload_status = reload_hyprland()
-    return {"success": reload_status.get("success", False), "key": norm_key, "reload": reload_status}
+    status = _verify_and_rollback(prior, norm_key)
+    return {"success": status.get("success", False), "key": norm_key, "reload": status.get("reload"), "error": status.get("error")}
 
 def main():
     if len(sys.argv) < 2:

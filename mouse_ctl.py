@@ -10,22 +10,24 @@ Hardened security implementation:
 """
 
 import argparse
+import errno
 import fcntl
 import json
 import math
 import os
 import re
+import select
 import shutil
 import signal
 import stat
 import subprocess
 import sys
-import tempfile
+import time
 from contextlib import contextmanager
 from pathlib import Path
 
 MAX_SUBPROCESS_TIMEOUT = 15
-MAX_SUBPROCESS_OUTPUT = 1_048_576  # retained bytes per captured stream
+MAX_SUBPROCESS_OUTPUT = 1_048_576  # hard aggregate ceiling across stdout+stderr, enforced while streaming
 MAX_JSON_INPUT_BYTES = 1_048_576
 MAX_CONFIG_READ_BYTES = 1_048_576
 
@@ -65,75 +67,135 @@ SIMULATE_BUTTON_CODES = {
     "side_forward": "0xC4"
 }
 
-def _open_dir_fd(path: Path) -> int:
-    """Open a directory file descriptor for the parent of a target config file,
-    refusing to follow a symlinked final directory and requiring that the final
-    directory is real and owned by the user. Ancestors only need to be real
-    directories on the way to it."""
+def _walk_parent_fd(path: Path) -> int:
+    """Return a dirfd to path.parent using component-wise descriptor-relative
+    traversal: every component is opened with openat(..., O_DIRECTORY|O_NOFOLLOW)
+    relative to the previously retained dirfd, walking from '/'. No pathname is
+    ever followed, so a symlink substitution at any ancestor is rejected."""
+    if not path.is_absolute():
+        raise ValueError(f"expected absolute path: {path}")
     parent = path.parent
-    if not parent.exists():
-        parent.mkdir(parents=True, exist_ok=True)
-    # Verify the ancestor chain resolves through real directories.
-    parts = [Path("/")] + [Path(p) for p in parent.parts[1:]]
-    for comp in parts[:-1]:
-        if not comp.exists():
-            break
-        if not stat.S_ISDIR(os.stat(comp).st_mode):
-            raise ValueError(f"refusing non-directory config component: {comp}")
-    # The final parent must be a real directory owned by the user.
+    parent_parts = parent.parts[1:]  # drop the leading root component
+    fd = os.open("/", os.O_RDONLY | os.O_DIRECTORY)
     try:
-        st = os.stat(parent)
-    except OSError as e:
-        raise ValueError(f"cannot stat config directory: {parent} ({e})") from e
-    if not stat.S_ISDIR(st.st_mode):
-        raise ValueError(f"refusing non-directory config parent: {parent}")
-    if st.st_uid != os.geteuid():
-        raise ValueError(f"refusing config directory not owned by user: {parent}")
-    # Open it no-follow so a symlink swap at the final hop is rejected.
-    try:
-        return os.open(str(parent), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-    except OSError as e:
-        raise ValueError(f"cannot open config directory safely: {parent} ({e})") from e
-
-
-def _safe_stat(path: Path):
-    """Return an fstat of path opened no-follow, insisting on a regular file to
-    which the effective user owns. Raises ValueError on any unsafe condition."""
-    try:
-        fd = os.open(str(path), os.O_RDONLY | os.O_NOFOLLOW)
-    except FileNotFoundError:
-        raise FileNotFoundError(str(path)) from None
-    except OSError as e:
-        raise ValueError(f"refusing non-regular/symlink path: {path} ({e})") from e
-    try:
-        st = os.fstat(fd)
-        if not stat.S_ISREG(st.st_mode):
-            raise ValueError(f"refusing non-regular file: {path}")
-        if st.st_uid != os.geteuid():
-            raise ValueError(f"refusing file not owned by user: {path}")
-        return fd, st
+        for comp in parent_parts:
+            try:
+                nfd = os.open(comp, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+            except OSError as e:
+                raise ValueError(f"cannot traverse config component: {comp} ({e})") from e
+            os.close(fd)
+            fd = nfd
+            st = os.fstat(fd)
+            if not stat.S_ISDIR(st.st_mode):
+                raise ValueError(f"refusing non-directory config component: {comp}")
+        return fd
     except BaseException:
         os.close(fd)
         raise
 
 
+def _open_leaf(path: Path, flags: int, mode=None, *, owner_check=True):
+    """Open path's leaf relative to its verified parent dirfd, no-follow, and
+    enforce regular-file + (optionally) user-ownership on the result.
+    Returns (fd, stat). Raises on any unsafe condition; FileNotFoundError is
+    propagated unchanged when the leaf is genuinely absent."""
+    parent_fd = _walk_parent_fd(path)
+    try:
+        try:
+            if mode is not None:
+                fd = os.open(path.name, flags, mode, dir_fd=parent_fd)
+            else:
+                fd = os.open(path.name, flags, dir_fd=parent_fd)
+        except FileNotFoundError:
+            raise
+        except IsADirectoryError:
+            raise ValueError(f"refusing directory where file expected: {path}")
+        except OSError as e:
+            raise ValueError(f"refusing unsafe path: {path} ({e})") from e
+        try:
+            st = os.fstat(fd)
+            if not stat.S_ISREG(st.st_mode):
+                raise ValueError(f"refusing non-regular file: {path}")
+            if owner_check and st.st_uid != os.geteuid():
+                raise ValueError(f"refusing file not owned by user: {path}")
+            return fd, st
+        except BaseException:
+            os.close(fd)
+            raise
+    finally:
+        os.close(parent_fd)
+
+
 def safe_read_file(path: Path, max_bytes: int = MAX_CONFIG_READ_BYTES) -> str:
     """Read a config file with size, regular-file, owner, no-follow and
-    safe-parent checks. Raises ValueError/FileNotFoundError on unsafe conditions."""
-    if not path.parent.is_dir():
-        if not path.exists():
-            raise FileNotFoundError(str(path))
-    fd, st = _safe_stat(path)
+    descriptor-relative-parent checks. Raises FileNotFoundError when genuinely
+    absent and ValueError/UnicodeDecodeError on unsafe/oversized/undecodable
+    content (fail closed, never returning a mangled or empty result)."""
+    fd, st = _open_leaf(path, os.O_RDONLY | os.O_NOFOLLOW, owner_check=True)
     try:
         if st.st_size > max_bytes:
             raise ValueError(f"refusing oversized config file: {path} ({st.st_size} bytes)")
-        with os.fdopen(fd, "r", encoding="utf-8") as f:
-            content = f.read(max_bytes)
-        if len(content.encode("utf-8")) > max_bytes:
+        raw = os.read(fd, max_bytes + 1)
+        if len(raw) > max_bytes:
             raise ValueError(f"refusing oversized config file: {path}")
-        return content
-    except BaseException:
-        raise
+        return raw.decode("utf-8")
+    finally:
+        os.close(fd)
+
+
+def _snapshot_file(path: Path):
+    """Return (raw_bytes, mode) of the file via descriptor-relative no-follow
+    read, or None if the file is genuinely absent. Raises (fails closed) on any
+    unsafe/read/overflow condition."""
+    try:
+        fd, st = _open_leaf(path, os.O_RDONLY | os.O_NOFOLLOW, owner_check=False)
+    except FileNotFoundError:
+        return None
+    try:
+        if st.st_size > MAX_CONFIG_READ_BYTES:
+            raise ValueError(f"refusing oversized config file for rollback: {path}")
+        raw = os.read(fd, max(st.st_size, 0))
+        return raw, stat.S_IMODE(st.st_mode)
+    finally:
+        os.close(fd)
+
+
+def _restore_file(path: Path, prior) -> None:
+    """Atomically restore a file previously captured by _snapshot_file. A prior
+    value of None means the file did not previously exist and is removed.
+    Restores exact bytes and mode via descriptor-relative rename."""
+    parent_fd = _walk_parent_fd(path)
+    try:
+        if prior is None:
+            try:
+                os.unlink(path.name, dir_fd=parent_fd)
+            except FileNotFoundError:
+                pass
+            return
+        raw, mode = prior
+        tmp_name = f".{path.name}.{os.getpid()}.{os.urandom(4).hex}.tmp"
+        tmp_fd = os.open(tmp_name, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode, dir_fd=parent_fd)
+        try:
+            wrote = 0
+            while wrote < len(raw):
+                wrote += os.write(tmp_fd, raw[wrote:])
+            os.fsync(tmp_fd)
+            os.close(tmp_fd)
+            tmp_fd = -1
+            os.replace(tmp_name, path.name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+        except BaseException:
+            try:
+                if tmp_fd != -1:
+                    os.close(tmp_fd)
+            except OSError:
+                pass
+            try:
+                os.unlink(tmp_name, dir_fd=parent_fd)
+            except OSError:
+                pass
+            raise
+    finally:
+        os.close(parent_fd)
 
 
 def _lock_fd(fd: int):
@@ -155,11 +217,9 @@ def _unlock_fd(fd: int):
 def file_lock():
     """Acquires an exclusive lock across read-modify-write operations to prevent
     races. Fail-closed: any lock or path error aborts the operation."""
-    LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
-    lock_dir_fd = _open_dir_fd(LOCK_PATH)
-    lock_ref = os.path.join("/proc/self/fd", str(lock_dir_fd), LOCK_PATH.name)
+    lock_dir_fd = _walk_parent_fd(LOCK_PATH)
     try:
-        lock_fd = os.open(lock_ref, os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+        lock_fd = os.open(LOCK_PATH.name, os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW, 0o600, dir_fd=lock_dir_fd)
     except OSError as e:
         os.close(lock_dir_fd)
         raise RuntimeError(f"cannot open lock file safely: {LOCK_PATH} ({e})") from e
@@ -182,74 +242,136 @@ def file_lock():
             os.close(lock_dir_fd)
 
 
-def safe_atomic_write(target_path: Path, content: str) -> bool:
-    """Atomically replace target_path with content, refusing symlinks and
-    verifying the parent directory descriptor, using rename-by-dirfd so no
-    check-then-unlink window exists."""
+def safe_atomic_write(target_path: Path, content: str, mode: int = None) -> bool:
+    """Atomically replace target_path with content via descriptor-relative
+    temp-file + fsync + rename-by-dirfd, preserving the existing file mode (or
+    using `mode` / a safe default when the file is absent). No check-then-unlink
+    window exists for the final component. Raises (fails closed) on failure and
+    returns True on success."""
+    data = content.encode("utf-8")
+    parent_fd = _walk_parent_fd(target_path)
     try:
-        parent_dir_fd = _open_dir_fd(target_path)
-        parent_fd = os.dup(parent_dir_fd)
-        os.close(parent_dir_fd)
-    except ValueError:
-        return False
-    tmp_name = None
-    try:
-        fd, tmp_name = tempfile.mkstemp(
-            dir="/proc/self/fd/" + str(parent_fd),
-            prefix=f"{target_path.name}.",
-            suffix=".tmp",
-        )
+        target_mode = mode
         try:
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                f.write(content)
-                f.flush()
-                os.fsync(f.fileno())
-            replacement_ref = os.path.join("/proc/self/fd", str(parent_fd), os.path.basename(tmp_name))
-            os.replace(replacement_ref, os.path.join("/proc/self/fd", str(parent_fd), target_path.name))
-            return True
-        except Exception:
+            efd = os.open(target_path.name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=parent_fd)
             try:
-                if tmp_name:
-                    os.unlink(tmp_name)
+                target_mode = stat.S_IMODE(os.fstat(efd).st_mode)
+            finally:
+                os.close(efd)
+        except FileNotFoundError:
+            pass
+        if target_mode is None:
+            target_mode = 0o600
+        tmp_name = f".{target_path.name}.{os.getpid()}.{os.urandom(4).hex}.tmp"
+        tmp_fd = os.open(tmp_name, os.O_WRONLY | os.O_CREAT | os.O_EXCL, target_mode, dir_fd=parent_fd)
+        try:
+            wrote = 0
+            while wrote < len(data):
+                wrote += os.write(tmp_fd, data[wrote:])
+            os.fsync(tmp_fd)
+            os.close(tmp_fd)
+            tmp_fd = -1
+            os.replace(tmp_name, target_path.name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+            return True
+        except BaseException:
+            try:
+                if tmp_fd != -1:
+                    os.close(tmp_fd)
             except OSError:
                 pass
-            return False
+            try:
+                os.unlink(tmp_name, dir_fd=parent_fd)
+            except OSError:
+                pass
+            raise
     finally:
         os.close(parent_fd)
 
 
 def run_cmd(cmd) -> tuple:
-    """Run a command with a hard timeout, retained-output byte limit and
-    process-group cleanup so no child survives a timeout or crash."""
+    """Run a command with:
+      - a hard wall-clock timeout,
+      - a hard aggregate stdout+stderr byte ceiling that is enforced *while
+        streaming* (not after the process exits), and
+      - whole-process-group cleanup (SIGTERM -> SIGKILL + reap) on both
+        overflow and timeout, so no child survives.
+    Returns (returncode, bounded_stdout, bounded_stderr)."""
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        start_new_session=True,
+    )
+    out = bytearray()
+    err = bytearray()
+    total = 0
+    overflow = False
+    timed_out = False
+    deadline = time.monotonic() + MAX_SUBPROCESS_TIMEOUT
     try:
-        proc = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            start_new_session=True,
-        )
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                timed_out = True
+                break
+            fds = [fd for fd in (proc.stdout, proc.stderr) if fd is not None and not fd.closed]
+            if not fds:
+                break
+            rlist, _, _ = select.select(fds, [], [], min(remaining, 0.2))
+            for fd in rlist:
+                data = os.read(fd.fileno(), 8192)
+                if not data:
+                    fd.close()
+                    continue
+                if total + len(data) > MAX_SUBPROCESS_OUTPUT:
+                    overflow = True
+                    continue
+                total += len(data)
+                if fd is proc.stdout:
+                    out += data
+                else:
+                    err += data
+            if overflow:
+                break
+        if timed_out or overflow:
+            _kill_and_reap(proc)
+            if timed_out:
+                return 1, _decode(out), "command timed out"
+            return 1, _decode(out), "command output limit exceeded"
+        code = proc.wait()
+        return code, _decode(out), _decode(err)
+    except Exception as exc:
+        _kill_and_reap(proc)
+        return 1, _decode(out), str(exc)
+
+
+def _kill_and_reap(proc):
+    """Terminate the whole process group (not just the leader), escalate to
+    SIGKILL, and reap so no child process survives."""
+    try:
+        os.killpg(proc.pid, signal.SIGTERM)
+    except (ProcessLookupError, PermissionError, OSError):
+        pass
+    try:
+        proc.wait(timeout=2)
+        return
+    except subprocess.TimeoutExpired:
+        pass
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError, OSError):
+        pass
+    try:
+        proc.wait(timeout=2)
+    except subprocess.TimeoutExpired:
         try:
-            out, err = proc.communicate(timeout=MAX_SUBPROCESS_TIMEOUT)
-        except subprocess.TimeoutExpired:
-            try:
-                os.killpg(proc.pid, signal.SIGTERM)
-            except OSError:
-                pass
-            try:
-                proc.communicate(timeout=2)
-            except Exception:
-                pass
-            try:
-                os.killpg(proc.pid, signal.SIGKILL)
-            except OSError:
-                pass
             proc.wait()
-            return 1, "", "command timed out"
-        code = proc.returncode
-        return code, (out or "")[:MAX_SUBPROCESS_OUTPUT], (err or "")[:MAX_SUBPROCESS_OUTPUT]
-    except Exception as e:
-        return 1, "", str(e)
+        except Exception:
+            pass
+
+
+def _decode(data: bytearray) -> str:
+    return bytes(data).decode("utf-8", errors="replace").strip()
 
 def validate_float(val, default: float, min_val: float, max_val: float) -> float:
     try:
@@ -287,13 +409,6 @@ def validate_button_mapping(button: str, action: str) -> str:
     if str(action) in allowed:
         return str(action)
     return default
-
-def run_cmd(cmd):
-    try:
-        res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False)
-        return res.returncode, res.stdout.strip(), res.stderr.strip()
-    except Exception as e:
-        return 1, "", str(e)
 
 def get_hypr_option(opt_name):
     code, out, _ = run_cmd(["hyprctl", "getoption", opt_name, "-j"])
@@ -371,74 +486,70 @@ def get_battery(primary_name=""):
 
 def read_saved_input_settings():
     settings = {}
-    if not INPUT_LUA_PATH.exists():
-        return settings
     try:
         content = safe_read_file(INPUT_LUA_PATH)
-        if START_MARKER in content and END_MARKER in content:
-            block = content.split(START_MARKER)[1].split(END_MARKER)[0]
-            sens_match = re.search(r"sensitivity\s*=\s*([-+]?[0-9]*\.?[0-9]+)", block)
-            if sens_match:
-                settings["sensitivity"] = validate_float(sens_match.group(1), 0.0, -1.0, 1.0)
-            accel_match = re.search(r'accel_profile\s*=\s*"([^"]+)"', block)
-            if accel_match:
-                settings["accel_profile"] = validate_accel_profile(accel_match.group(1))
-            follow_match = re.search(r"follow_mouse\s*=\s*([0-9]+)", block)
-            if follow_match:
-                settings["follow_mouse"] = validate_int(follow_match.group(1), 1, 0, 3)
-            natural_match = re.search(r"natural_scroll\s*=\s*(true|false)", block)
-            if natural_match:
-                settings["natural_scroll"] = (natural_match.group(1) == "true")
-            left_match = re.search(r"left_handed\s*=\s*(true|false)", block)
-            if left_match:
-                settings["left_handed"] = (left_match.group(1) == "true")
-            scroll_match = re.search(r"scroll_factor\s*=\s*([-+]?[0-9]*\.?[0-9]+)", block)
-            if scroll_match:
-                settings["scroll_factor"] = validate_float(scroll_match.group(1), 1.0, 0.1, 8.0)
-            refocus_match = re.search(r"mouse_refocus\s*=\s*(true|false)", block)
-            if refocus_match:
-                settings["mouse_refocus"] = (refocus_match.group(1) == "true")
-    except Exception:
-        pass
+    except FileNotFoundError:
+        return settings
+    if START_MARKER in content and END_MARKER in content:
+        block = content.split(START_MARKER)[1].split(END_MARKER)[0]
+        sens_match = re.search(r"sensitivity\s*=\s*([-+]?[0-9]*\.?[0-9]+)", block)
+        if sens_match:
+            settings["sensitivity"] = validate_float(sens_match.group(1), 0.0, -1.0, 1.0)
+        accel_match = re.search(r'accel_profile\s*=\s*"([^"]+)"', block)
+        if accel_match:
+            settings["accel_profile"] = validate_accel_profile(accel_match.group(1))
+        follow_match = re.search(r"follow_mouse\s*=\s*([0-9]+)", block)
+        if follow_match:
+            settings["follow_mouse"] = validate_int(follow_match.group(1), 1, 0, 3)
+        natural_match = re.search(r"natural_scroll\s*=\s*(true|false)", block)
+        if natural_match:
+            settings["natural_scroll"] = (natural_match.group(1) == "true")
+        left_match = re.search(r"left_handed\s*=\s*(true|false)", block)
+        if left_match:
+            settings["left_handed"] = (left_match.group(1) == "true")
+        scroll_match = re.search(r"scroll_factor\s*=\s*([-+]?[0-9]*\.?[0-9]+)", block)
+        if scroll_match:
+            settings["scroll_factor"] = validate_float(scroll_match.group(1), 1.0, 0.1, 8.0)
+        refocus_match = re.search(r"mouse_refocus\s*=\s*(true|false)", block)
+        if refocus_match:
+            settings["mouse_refocus"] = (refocus_match.group(1) == "true")
     return settings
 
 def read_saved_button_mappings():
     mappings = dict(DEFAULT_BUTTON_MAPPINGS)
-    if not BINDINGS_LUA_PATH.exists():
-        return mappings
     try:
         content = safe_read_file(BINDINGS_LUA_PATH)
-        if BINDINGS_START_MARKER in content and BINDINGS_END_MARKER in content:
-            block = content.split(BINDINGS_START_MARKER)[1].split(BINDINGS_END_MARKER)[0]
-            if 'o.bind("mouse:275", "Previous workspace"' in block:
-                mappings["side_back"] = "prev_workspace"
-            elif 'o.bind("mouse:275", "Omarchy menu"' in block:
-                mappings["side_back"] = "menu"
-            elif 'o.bind("mouse:275", "Previous window"' in block:
-                mappings["side_back"] = "prev_window"
+    except FileNotFoundError:
+        return mappings
+    if BINDINGS_START_MARKER in content and BINDINGS_END_MARKER in content:
+        block = content.split(BINDINGS_START_MARKER)[1].split(BINDINGS_END_MARKER)[0]
+        if 'o.bind("mouse:275", "Previous workspace"' in block:
+            mappings["side_back"] = "prev_workspace"
+        elif 'o.bind("mouse:275", "Omarchy menu"' in block:
+            mappings["side_back"] = "menu"
+        elif 'o.bind("mouse:275", "Previous window"' in block:
+            mappings["side_back"] = "prev_window"
 
-            if 'o.bind("mouse:276", "Next workspace"' in block:
-                mappings["side_forward"] = "next_workspace"
-            elif 'o.bind("mouse:276", "Terminal"' in block:
-                mappings["side_forward"] = "terminal"
-            elif 'o.bind("mouse:276", "Next window"' in block:
-                mappings["side_forward"] = "next_window"
+        if 'o.bind("mouse:276", "Next workspace"' in block:
+            mappings["side_forward"] = "next_workspace"
+        elif 'o.bind("mouse:276", "Terminal"' in block:
+            mappings["side_forward"] = "terminal"
+        elif 'o.bind("mouse:276", "Next window"' in block:
+            mappings["side_forward"] = "next_window"
 
-            if 'o.bind("mouse:274", "Close active window"' in block:
-                mappings["middle_click"] = "close_window"
-            elif 'o.bind("mouse:274", "Toggle floating"' in block:
-                mappings["middle_click"] = "toggle_floating"
-            elif 'o.bind("mouse:274", "Toggle fullscreen"' in block:
-                mappings["middle_click"] = "toggle_fullscreen"
+        if 'o.bind("mouse:274", "Close active window"' in block:
+            mappings["middle_click"] = "close_window"
+        elif 'o.bind("mouse:274", "Toggle floating"' in block:
+            mappings["middle_click"] = "toggle_floating"
+        elif 'o.bind("mouse:274", "Toggle fullscreen"' in block:
+            mappings["middle_click"] = "toggle_fullscreen"
 
-            if 'hl.unbind("SUPER + mouse:272")' in block:
-                mappings["super_left"] = "disabled"
-            if 'hl.unbind("SUPER + mouse:273")' in block:
-                mappings["super_right"] = "disabled"
-            if 'hl.unbind("SUPER + mouse_down")' in block:
-                mappings["super_wheel"] = "disabled"
-    except Exception:
-        pass
+        if 'hl.unbind("SUPER + mouse:272")' in block:
+            mappings["super_left"] = "disabled"
+        if 'hl.unbind("SUPER + mouse:273")' in block:
+            mappings["super_right"] = "disabled"
+        if 'hl.unbind("SUPER + mouse_down")' in block:
+            mappings["super_wheel"] = "disabled"
     return mappings
 
 def get_current_status():
@@ -498,13 +609,10 @@ def apply_hypr_eval(settings) -> bool:
     return code == 0
 
 def persist_to_input_lua(settings) -> bool:
-    if not INPUT_LUA_PATH.exists():
+    try:
+        original_content = safe_read_file(INPUT_LUA_PATH)
+    except FileNotFoundError:
         original_content = "-- User input overrides\n"
-    else:
-        try:
-            original_content = safe_read_file(INPUT_LUA_PATH)
-        except Exception:
-            original_content = ""
     sensitivity = validate_float(settings.get("sensitivity"), 0.0, -1.0, 1.0)
     accel = validate_accel_profile(settings.get("accel_profile", "adaptive"))
     accel_lua = f'"{accel}"' if accel in ("flat", "adaptive", "custom") else '""'
@@ -535,18 +643,14 @@ def persist_to_input_lua(settings) -> bool:
         updated_content = original_content.rstrip() + "\n\n" + new_block + "\n"
     if updated_content == original_content:
         return False
-    if not safe_atomic_write(INPUT_LUA_PATH, updated_content):
-        raise RuntimeError(f"failed to write config safely: {INPUT_LUA_PATH}")
+    safe_atomic_write(INPUT_LUA_PATH, updated_content)
     return True
 
 def persist_to_bindings_lua(mappings) -> bool:
-    if not BINDINGS_LUA_PATH.exists():
+    try:
+        original_content = safe_read_file(BINDINGS_LUA_PATH)
+    except FileNotFoundError:
         original_content = "-- User keybinding overrides\n"
-    else:
-        try:
-            original_content = safe_read_file(BINDINGS_LUA_PATH)
-        except Exception:
-            original_content = ""
     lines = []
     lines.append(BINDINGS_START_MARKER)
     sb = validate_button_mapping("side_back", mappings.get("side_back", "default"))
@@ -598,12 +702,37 @@ def persist_to_bindings_lua(mappings) -> bool:
         updated_content = original_content.rstrip() + "\n\n" + new_block + "\n"
     if updated_content == original_content:
         return False
-    if not safe_atomic_write(BINDINGS_LUA_PATH, updated_content):
-        raise RuntimeError(f"failed to write config safely: {BINDINGS_LUA_PATH}")
+    safe_atomic_write(BINDINGS_LUA_PATH, updated_content)
     return True
 
 def notify_user(title, message, icon="input-mouse"):
     run_cmd(["notify-send", "-a", "Omarchy", "-i", icon, str(title), str(message)])
+
+def _reload_and_verify():
+    """Reload Hyprland and report (ok, error). ok is False if reload failed or
+    Hyprland reports config errors (a proxy for config-validation failure)."""
+    run_cmd(["hyprctl", "reload"])
+    code, err_out, _ = run_cmd(["hyprctl", "configerrors"])
+    err = (err_out or "").strip()
+    return (code == 0 and not err), err
+
+
+def _commit_changes(paths, write_fn):
+    """Snapshot the given config files, run write_fn(), reload + verify, and on
+    failure atomically roll back every snapshot (restoring exact bytes + mode)
+    and reload again. Returns (ok, error)."""
+    prior = {p: _snapshot_file(p) for p in paths}
+    write_fn()
+    ok, err = _reload_and_verify()
+    if ok:
+        return True, err
+    for p, snap in prior.items():
+        try:
+            _restore_file(p, snap)
+        except Exception:
+            pass
+    _reload_and_verify()
+    return False, (err or "config validation failed; changes rolled back")
 
 def main():
     parser = argparse.ArgumentParser(description="Omarchy Mouse Control Helper")
@@ -645,22 +774,28 @@ def main():
             new_profile = "adaptive" if current["accel_profile"] == "flat" else "flat"
             current["accel_profile"] = new_profile
             current["is_flat"] = (new_profile == "flat")
-            eval_ok = apply_hypr_eval(current)
-            persist_to_input_lua(current)
+            apply_hypr_eval(current)
+            ok, err = _commit_changes([INPUT_LUA_PATH], lambda: persist_to_input_lua(current))
             label = "Precision (Raw 1:1)" if new_profile == "flat" else "Desktop (Dynamic)"
+            if not ok:
+                print(json.dumps({"success": False, "error": err}))
+                return
             notify_user("Mouse Acceleration", f"Switched to {label}")
-            print(json.dumps({"success": eval_ok, "accel_profile": new_profile, "label": label}))
+            print(json.dumps({"success": True, "accel_profile": new_profile, "label": label}))
             return
 
         if args.command == "toggle-natural-scroll":
             current = get_current_status()
             new_val = not current["natural_scroll"]
             current["natural_scroll"] = new_val
-            eval_ok = apply_hypr_eval(current)
-            persist_to_input_lua(current)
+            apply_hypr_eval(current)
+            ok, err = _commit_changes([INPUT_LUA_PATH], lambda: persist_to_input_lua(current))
             label = "Natural (Mobile)" if new_val else "Traditional (Classic PC)"
+            if not ok:
+                print(json.dumps({"success": False, "error": err}))
+                return
             notify_user("Mouse Scrolling", f"Scroll direction set to {label}")
-            print(json.dumps({"success": eval_ok, "natural_scroll": new_val, "label": label}))
+            print(json.dumps({"success": True, "natural_scroll": new_val, "label": label}))
             return
 
         if args.command == "reset-defaults":
@@ -673,13 +808,16 @@ def main():
                 "scroll_factor": 1.0,
                 "mouse_refocus": True,
             }
-            eval_ok = apply_hypr_eval(defaults)
-            input_changed = persist_to_input_lua(defaults)
-            bindings_changed = persist_to_bindings_lua(DEFAULT_BUTTON_MAPPINGS)
-            if bindings_changed or input_changed:
-                run_cmd(["hyprctl", "reload"])
+            apply_hypr_eval(defaults)
+            ok, err = _commit_changes(
+                [INPUT_LUA_PATH, BINDINGS_LUA_PATH],
+                lambda: (persist_to_input_lua(defaults), persist_to_bindings_lua(DEFAULT_BUTTON_MAPPINGS)),
+            )
+            if not ok:
+                print(json.dumps({"success": False, "error": err}))
+                return
             notify_user("Mouse Settings", "Reset to Omarchy defaults")
-            print(json.dumps({"success": eval_ok, "status": get_current_status()}))
+            print(json.dumps({"success": True, "status": get_current_status()}))
             return
 
         if args.command == "apply":
@@ -730,17 +868,28 @@ def main():
                     print(json.dumps({"success": False, "error": f"Invalid JSON: {e}"}))
                     return
             eval_ok = True
+            change_paths = []
+            write_ops = []
             if has_input_change:
+                change_paths.append(INPUT_LUA_PATH)
+                write_ops.append(lambda: persist_to_input_lua(current))
                 eval_ok = apply_hypr_eval(current)
-                persist_to_input_lua(current)
             if has_bindings_change:
-                bindings_changed = persist_to_bindings_lua(current.get("button_mappings", {}))
-                if bindings_changed:
-                    run_cmd(["hyprctl", "reload"])
-            _, err_out, _ = run_cmd(["hyprctl", "configerrors"])
+                change_paths.append(BINDINGS_LUA_PATH)
+                write_ops.append(lambda: persist_to_bindings_lua(current.get("button_mappings", {})))
+            if change_paths:
+                def _write_all():
+                    for op in write_ops:
+                        op()
+                ok, err = _commit_changes(change_paths, _write_all)
+            else:
+                ok, err = True, None
+            if not ok:
+                print(json.dumps({"success": False, "error": err}))
+                return
             print(json.dumps({
-                "success": eval_ok and not err_out,
-                "error": err_out if err_out else None,
+                "success": eval_ok and ok,
+                "error": err if err else None,
                 "status": get_current_status()
             }))
             return

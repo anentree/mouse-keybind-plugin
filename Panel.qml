@@ -311,32 +311,34 @@ Panel {
     function toggleAccel(): void { root.toggleAccelMode() }
   }
 
-  // Mouse settings processes
-  Process {
+  // Mouse settings processes (bounded: capped output, wall-clock deadline,
+  // whole-process-group termination on timeout/overflow)
+  BoundedProcess {
     id: statusProc
     running: true
     command: ["python3", root.scriptPath(), "status"]
-    stdout: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: {
-        var output = text || ""
-        try {
-          var data = JSON.parse(output)
-          root.status = data
-        } catch (e) {
-          // ignore transient parse error
-        }
+    maxBytes: 262144
+    timeoutMs: 5000
+    onFinished: {
+      if (!success) return
+      var output = stdout || ""
+      try {
+        var data = JSON.parse(output)
+        root.status = data
+      } catch (e) {
+        // ignore transient parse error
       }
     }
   }
 
-  Process {
+  BoundedProcess {
     id: applyProc
-    stdout: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: {
-        root.isSaving = false
-        var output = text || ""
+    maxBytes: 262144
+    timeoutMs: 30000
+    onFinished: {
+      root.isSaving = false
+      var output = stdout || ""
+      if (success) {
         try {
           var data = JSON.parse(output)
           if (data.success) {
@@ -347,68 +349,58 @@ Panel {
         } catch (e) {
           root.lastActionNote = "Saved"
         }
-        clearNoteTimer.restart()
+      } else {
+        root.lastActionNote = "Error"
       }
-    }
-    stderr: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: {
-        if (text.trim() !== "") {
-          root.isSaving = false
-          root.lastActionNote = "Error"
-          clearNoteTimer.restart()
-        }
-      }
+      clearNoteTimer.restart()
     }
   }
 
-  Process {
+  BoundedProcess {
     id: toggleAccelProc
     command: ["python3", root.scriptPath(), "toggle-accel"]
-    stdout: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: root.fetchStatus()
-    }
+    timeoutMs: 15000
+    onFinished: root.fetchStatus()
   }
 
-  Process {
+  BoundedProcess {
     id: toggleScrollProc
     command: ["python3", root.scriptPath(), "toggle-natural-scroll"]
-    stdout: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: root.fetchStatus()
-    }
+    timeoutMs: 15000
+    onFinished: root.fetchStatus()
   }
 
-  Process {
+  BoundedProcess {
     id: resetProc
     command: ["python3", root.scriptPath(), "reset-defaults"]
-    stdout: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: root.fetchStatus()
-    }
+    timeoutMs: 15000
+    onFinished: root.fetchStatus()
   }
 
-  Process {
+  BoundedProcess {
     id: simulateProc
-    stdout: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: {
-        var output = text || ""
-        try {
-          var data = JSON.parse(output)
-          if (data.success) {
-            testBox.clickCount += 1
-            testBox.testMsg = "Simulated " + root.simLabel(data.button) + " (#" + testBox.clickCount + ")"
-            root.lastActionNote = "Sent"
-          } else {
-            root.lastActionNote = "Sim N/A"
-          }
-        } catch (e) {
+    maxBytes: 262144
+    timeoutMs: 15000
+    onFinished: {
+      if (!success) {
+        root.lastActionNote = "Sim N/A"
+        clearNoteTimer.restart()
+        return
+      }
+      var output = stdout || ""
+      try {
+        var data = JSON.parse(output)
+        if (data.success) {
+          testBox.clickCount += 1
+          testBox.testMsg = "Simulated " + root.simLabel(data.button) + " (#" + testBox.clickCount + ")"
+          root.lastActionNote = "Sent"
+        } else {
           root.lastActionNote = "Sim N/A"
         }
-        clearNoteTimer.restart()
+      } catch (e) {
+        root.lastActionNote = "Sim N/A"
       }
+      clearNoteTimer.restart()
     }
   }
 
@@ -426,58 +418,47 @@ Panel {
     id: summonKbProc
   }
 
-  // Keybind summary process
-  Process {
+  // Keybind summary process (bounded)
+  BoundedProcess {
     id: keybindSummaryProc
     command: [
       Quickshell.env("HOME") + "/.config/omarchy/plugins/davedes.mouse-keybind-settings/backend/keybinds_manager.py",
       "list"
     ]
-    stdout: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: {
-        root.keybindLoaded = true
-        if (text && text.trim().length > 0) {
-          try {
-            var parsed = JSON.parse(text)
-            if (parsed) root.keybindData = parsed
-          } catch (e) {
-            // ignore
-          }
+    maxBytes: 262144
+    timeoutMs: 10000
+    onFinished: {
+      root.keybindLoaded = true
+      if (!success) return
+      var text = stdout || ""
+      if (text && text.trim().length > 0) {
+        try {
+          var parsed = JSON.parse(text)
+          if (parsed) root.keybindData = parsed
+        } catch (e) {
+          // ignore
         }
       }
     }
   }
 
-  // Quick keybind mutation processes
-  Process {
+  // Quick keybind mutation processes (bounded)
+  BoundedProcess {
     id: kbResetProc
-    stdout: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: {
-        root.refreshKeybindData()
-      }
-    }
+    timeoutMs: 30000
+    onFinished: root.refreshKeybindData()
   }
 
-  Process {
+  BoundedProcess {
     id: kbEnableProc
-    stdout: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: {
-        root.refreshKeybindData()
-      }
-    }
+    timeoutMs: 30000
+    onFinished: root.refreshKeybindData()
   }
 
-  Process {
+  BoundedProcess {
     id: kbDisableProc
-    stdout: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: {
-        root.refreshKeybindData()
-      }
-    }
+    timeoutMs: 30000
+    onFinished: root.refreshKeybindData()
   }
 
   Timer {

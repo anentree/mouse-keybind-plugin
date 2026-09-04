@@ -789,23 +789,31 @@ def _restore_bindings(prior):
 def _verify_and_rollback(prior, key, old_key="", description=""):
     """After a write, reload Hyprland and validate. If reload fails or Hyprland
     reports config errors, atomically restore the exact prior file bytes + mode
-    and reload again, then report the failure with a rollback note."""
+    and reload again. The report is truthful about rollback: if restoration
+    fails, the returned dict says so (rolled_back False) instead of claiming a
+    rollback that did not happen."""
     status = reload_hyprland()
     if status.get("success") and not (status.get("config_errors") or "").strip():
         return status
+    rollback_error = ""
     try:
         _restore_bindings(prior)
-    except Exception:
-        pass
+    except Exception as exc:  # noqa: BLE001 - surfaced, never swallowed
+        rollback_error = str(exc)
     reload_hyprland()
     err = (status.get("config_errors") or "config validation failed").strip()
+    if rollback_error:
+        err = err + "; rollback FAILED: " + rollback_error
+    else:
+        err = err + "; changes rolled back"
     return {
         "success": False,
         "key": key,
         "old_key": old_key,
         "description": description,
         "reload": status,
-        "error": err + "; changes rolled back",
+        "rolled_back": not rollback_error,
+        "error": err,
     }
 
 def set_keybinding(key: str, description: str, command: str, action: str = "", old_key: str = "", override_conflicts: bool = True):

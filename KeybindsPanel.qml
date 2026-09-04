@@ -294,80 +294,75 @@ Item {
     return root.modelData.conflicts || []
   }
 
-  // --- Backend Subprocesses ---
+  // --- Backend Subprocesses (bounded: capped output, wall-clock deadline,
+  //     whole-process-group termination on timeout/overflow) ---
 
-  Process {
+  BoundedProcess {
     id: listProc
     command: [Quickshell.env("HOME") + "/.config/omarchy/plugins/davedes.mouse-keybind-settings/backend/keybinds_manager.py", "list"]
-    stdout: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: {
-        root.loading = false
-        if (text && text.trim().length > 0) {
-          try {
-            var parsed = JSON.parse(text)
-            if (parsed) root.modelData = parsed
-          } catch (e) {
-            console.warn("KeybindsPanel: Failed to parse backend json:", e)
-          }
+    maxBytes: 262144
+    timeoutMs: 10000
+    onFinished: {
+      root.loading = false
+      if (!success) return
+      var text = stdout || ""
+      if (text && text.trim().length > 0) {
+        try {
+          var parsed = JSON.parse(text)
+          if (parsed) root.modelData = parsed
+        } catch (e) {
+          console.warn("KeybindsPanel: Failed to parse backend json:", e)
         }
       }
     }
   }
 
-  Process {
+  BoundedProcess {
     id: setProc
-    stdout: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: {
-        console.log("[KB] setProc stdout:", text ? text.trim() : "(empty)")
-        root.loading = false
-        root.loadData()
-        root.showToast("Keybinding saved & applied to Hyprland!")
+    maxBytes: 262144
+    timeoutMs: 30000
+    onFinished: {
+      console.log("[KB] setProc stdout:", stdout ? stdout.trim() : "(empty)")
+      root.loading = false
+      if (!success) {
+        root.showToast("Failed to save keybinding")
+        return
       }
-    }
-    stderr: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: console.warn("[KB] setProc stderr:", text ? text.trim() : "(empty)")
-    }
-    onExited: function(exitCode, exitStatus) {
-      if (exitCode !== 0) console.warn("[KB] setProc exited", exitCode, exitStatus)
+      root.loadData()
+      root.showToast("Keybinding saved & applied to Hyprland!")
     }
   }
 
-  Process {
+  BoundedProcess {
     id: resetProc
-    stdout: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: {
-        root.loading = false
-        root.loadData()
-        root.showToast("Keybinding reset to default!")
-      }
+    maxBytes: 262144
+    timeoutMs: 30000
+    onFinished: {
+      root.loading = false
+      root.loadData()
+      if (success) root.showToast("Keybinding reset to default!")
     }
   }
 
-  Process {
+  BoundedProcess {
     id: enableProc
-    stdout: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: {
-        root.loading = false
-        root.loadData()
-        root.showToast("Keybinding re-enabled!")
-      }
+    maxBytes: 262144
+    timeoutMs: 30000
+    onFinished: {
+      root.loading = false
+      root.loadData()
+      if (success) root.showToast("Keybinding re-enabled!")
     }
   }
 
-  Process {
+  BoundedProcess {
     id: disableProc
-    stdout: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: {
-        root.loading = false
-        root.loadData()
-        root.showToast("Keybinding disabled!")
-      }
+    maxBytes: 262144
+    timeoutMs: 30000
+    onFinished: {
+      root.loading = false
+      root.loadData()
+      if (success) root.showToast("Keybinding disabled!")
     }
   }
 

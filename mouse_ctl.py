@@ -720,19 +720,25 @@ def _reload_and_verify():
 def _commit_changes(paths, write_fn):
     """Snapshot the given config files, run write_fn(), reload + verify, and on
     failure atomically roll back every snapshot (restoring exact bytes + mode)
-    and reload again. Returns (ok, error)."""
+    and reload again. Returns (ok, error). The error is truthful about
+    rollback: if any snapshot fails to restore, that is reported as a rollback
+    FAILURE, never as a success."""
     prior = {p: _snapshot_file(p) for p in paths}
     write_fn()
     ok, err = _reload_and_verify()
     if ok:
         return True, err
+    rollback_errors = []
     for p, snap in prior.items():
         try:
             _restore_file(p, snap)
-        except Exception:
-            pass
+        except Exception as exc:  # noqa: BLE001 - surfaced, never swallowed
+            rollback_errors.append(f"{p}: {exc}")
     _reload_and_verify()
-    return False, (err or "config validation failed; changes rolled back")
+    base = err or "config validation failed"
+    if rollback_errors:
+        return False, base + "; rollback FAILED: " + "; ".join(rollback_errors)
+    return False, base + "; changes rolled back"
 
 def main():
     parser = argparse.ArgumentParser(description="Omarchy Mouse Control Helper")

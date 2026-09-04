@@ -1,4 +1,4 @@
-import QtQml
+import QtQuick
 import Quickshell.Io
 
 // BoundedProcess: runs `command` (an argv list) with the same lifecycle
@@ -12,8 +12,13 @@ import Quickshell.Io
 //     process-group leader; termination signals (including kill(1) on the
 //     negative pid) then reach every descendant, not just the direct child.
 // Usage mirrors Quickshell.Io.Process: set `command`, then `running = true`.
-QtObject {
+// Rooted in an invisible Item (not QtObject) so the Process/Timer children can
+// attach to the default `data` property.
+Item {
   id: root
+  visible: false
+  width: 0
+  height: 0
 
   property var command: []
   property int maxBytes: 262144

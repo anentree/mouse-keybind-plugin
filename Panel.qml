@@ -1695,20 +1695,21 @@ Panel {
                       spacing: Style.space(10)
 
                       BorderSurface {
+                        id: kbActStBadge
                         Layout.preferredHeight: Style.space(20)
                         Layout.preferredWidth: kbActStTxt.implicitWidth + Style.space(10)
                         Layout.alignment: Qt.AlignVCenter
                         radius: Style.cornerRadius
                         readonly property string st: (kbActiveRow.modelData && kbActiveRow.modelData.status) || "default"
                         readonly property bool isConf: Boolean(kbActiveRow.modelData && kbActiveRow.modelData.is_conflict)
-                        color: isConf ? Util.alpha(root.urgent, 0.2) : (st === "custom" ? Util.alpha("#4CAF50", 0.2) : (st === "modified" ? Util.alpha("#FF9800", 0.2) : Util.alpha(root.foreground, 0.05)))
-                        borderSpec: Border.flat(isConf ? root.urgent : (st === "custom" ? "#4CAF50" : (st === "modified" ? "#FF9800" : Util.alpha(root.foreground, 0.15))), 1)
+                        color: kbActStBadge.isConf ? Util.alpha(root.urgent, 0.2) : (kbActStBadge.st === "custom" ? Util.alpha("#4CAF50", 0.2) : (kbActStBadge.st === "modified" ? Util.alpha("#FF9800", 0.2) : Util.alpha(root.foreground, 0.05)))
+                        borderSpec: Border.flat(kbActStBadge.isConf ? root.urgent : (kbActStBadge.st === "custom" ? "#4CAF50" : (kbActStBadge.st === "modified" ? "#FF9800" : Util.alpha(root.foreground, 0.15))), 1)
 
                         Text {
                           id: kbActStTxt
                           anchors.centerIn: parent
-                          text: isConf ? "CONFLICT" : st.toUpperCase()
-                          color: isConf ? root.urgent : (st === "custom" ? "#4CAF50" : (st === "modified" ? "#FF9800" : root.foreground))
+                          text: kbActStBadge.isConf ? "CONFLICT" : kbActStBadge.st.toUpperCase()
+                          color: kbActStBadge.isConf ? root.urgent : (kbActStBadge.st === "custom" ? "#4CAF50" : (kbActStBadge.st === "modified" ? "#FF9800" : root.foreground))
                           font.family: root.fontFamily
                           font.pixelSize: Style.font.caption - 3
                           font.bold: true
@@ -1807,19 +1808,20 @@ Panel {
                       spacing: Style.space(10)
 
                       BorderSurface {
+                        id: kbModStBadge
                         Layout.preferredHeight: Style.space(20)
                         Layout.preferredWidth: kbModStTxt.implicitWidth + Style.space(10)
                         Layout.alignment: Qt.AlignVCenter
                         radius: Style.cornerRadius
                         readonly property string st: (kbModRow.modelData && kbModRow.modelData.status) || "modified"
-                        color: st === "custom" ? Util.alpha("#4CAF50", 0.2) : Util.alpha("#FF9800", 0.2)
-                        borderSpec: Border.flat(st === "custom" ? "#4CAF50" : "#FF9800", 1)
+                        color: kbModStBadge.st === "custom" ? Util.alpha("#4CAF50", 0.2) : Util.alpha("#FF9800", 0.2)
+                        borderSpec: Border.flat(kbModStBadge.st === "custom" ? "#4CAF50" : "#FF9800", 1)
 
                         Text {
                           id: kbModStTxt
                           anchors.centerIn: parent
-                          text: st.toUpperCase()
-                          color: st === "custom" ? "#4CAF50" : "#FF9800"
+                          text: kbModStBadge.st.toUpperCase()
+                          color: kbModStBadge.st === "custom" ? "#4CAF50" : "#FF9800"
                           font.family: root.fontFamily
                           font.pixelSize: Style.font.caption - 3
                           font.bold: true

@@ -55,25 +55,63 @@ Panel {
     return "https://www.paypal.com/paypalme/DavidDesousa13"
   }
 
+  readonly property string settingsDir: Quickshell.env("HOME") + "/.local/state/omarchy/settings"
+  readonly property string settingsPath: root.settingsDir + "/davedes.mouse-keybind-settings.json"
+
   function setShowBuyButton(v) {
     root.showBuyButton = !!v
-    buyButtonFile.setText(JSON.stringify({ showBuyButton: root.showBuyButton }, null, 2) + "\n")
+    // Read-modify-write: the same file also carries keybindConflictMode
+    // (written by KeybindsPanel), so never overwrite keys we don't own.
+    var data = {}
+    try {
+      var cur = JSON.parse(buyButtonFile.text())
+      if (Util.isPlainObject(cur)) data = cur
+    } catch (e) { /* missing or corrupt file -> start fresh */ }
+    data.showBuyButton = root.showBuyButton
+    root.writePluginSettings(JSON.stringify(data, null, 2) + "\n")
   }
 
-  // Persisted config for the dropdown (currently just the Buy button toggle).
+  // Writes go through a mkdir -p first so a fresh machine (no state dir yet)
+  // still persists; the latest pending text wins if several writes queue up.
+  property string pendingSettingsText: ""
+
+  function writePluginSettings(text) {
+    root.pendingSettingsText = text
+    if (!settingsDirProc.running) settingsDirProc.running = true
+  }
+
+  BoundedProcess {
+    id: settingsDirProc
+    command: ["mkdir", "-p", root.settingsDir]
+    timeoutMs: 5000
+    onFinished: {
+      if (root.pendingSettingsText.length > 0) {
+        buyButtonFile.setText(root.pendingSettingsText)
+        root.pendingSettingsText = ""
+      }
+    }
+  }
+
+  function applyPluginSettings(raw) {
+    try {
+      var data = JSON.parse(raw)
+      if (Util.isPlainObject(data) && typeof data.showBuyButton === "boolean") root.showBuyButton = data.showBuyButton
+    } catch (e) { /* keep default */ }
+  }
+
+  // Persisted plugin settings (shared with KeybindsPanel.qml).
   FileView {
     id: buyButtonFile
-    path: Quickshell.env("HOME") + "/.local/state/omarchy/settings/davedes.mouse-keybind-settings.json"
-    watchChanges: false
+    path: root.settingsPath
+    watchChanges: true
+    atomicWrites: true
     printErrors: false
-    onLoaded: {
-      try {
-        var data = JSON.parse(text())
-        if (typeof data.showBuyButton === "boolean") root.showBuyButton = data.showBuyButton
-      } catch (e) { /* keep default */ }
-    }
+    onFileChanged: reload()
+    onLoaded: root.applyPluginSettings(text())
     onLoadFailed: { /* file absent -> use default */ }
   }
+
+  Component.onCompleted: settingsDirProc.running = true
 
   // Keybind panel references
   property var keybindData: ({})
@@ -253,8 +291,11 @@ Panel {
     root.close()
   }
 
-  function requestEditKeybinding(key) {
-    var payload = JSON.stringify({ edit: key || "" })
+  // Summon the full manager with the row to edit. Accepts a model row (preferred,
+  // carries the stable id) or a bare key string for older callers.
+  function requestEditKeybinding(row) {
+    var r = (typeof row === "string") ? { key: row } : (row || {})
+    var payload = JSON.stringify({ edit: r.key || "", id: Model.rowId(r) })
     summonKbProc.command = ["omarchy-shell", "shell", "summon", "davedes.mouse-keybind-settings", payload]
     summonKbProc.running = true
     root.close()
@@ -1685,7 +1726,7 @@ Panel {
                       id: kbActMouse
                       anchors.fill: parent
                       hoverEnabled: true
-                      onClicked: root.requestEditKeybinding(modelData.key)
+                      onClicked: root.requestEditKeybinding(modelData)
                     }
 
                     RowLayout {
@@ -1753,7 +1794,7 @@ Panel {
                         tooltipText: "Modify"
                         horizontalPadding: Style.space(6)
                         verticalPadding: Style.space(3)
-                        onClicked: root.requestEditKeybinding(kbActiveRow.modelData.key)
+                        onClicked: root.requestEditKeybinding(kbActiveRow.modelData)
                       }
                     }
                   }
@@ -1798,7 +1839,7 @@ Panel {
                       id: kbModMouse
                       anchors.fill: parent
                       hoverEnabled: true
-                      onClicked: root.requestEditKeybinding(modelData.key)
+                      onClicked: root.requestEditKeybinding(modelData)
                     }
 
                     RowLayout {
@@ -1861,7 +1902,7 @@ Panel {
                         tooltipText: "Modify"
                         horizontalPadding: Style.space(6)
                         verticalPadding: Style.space(3)
-                        onClicked: root.requestEditKeybinding(kbModRow.modelData.key)
+                        onClicked: root.requestEditKeybinding(kbModRow.modelData)
                       }
                     }
                   }

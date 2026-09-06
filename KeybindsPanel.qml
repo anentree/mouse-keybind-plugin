@@ -473,6 +473,9 @@ Item {
   // keystroke never rebuilds the list.
   property string lastListJson: ""
   readonly property string searchNeedle: root.searchQuery.trim().toLowerCase()
+  // Every word you type must appear somewhere in the row, in any order:
+  // "focus right" finds "Focus on right window".
+  readonly property var searchTokens: root.searchNeedle.length ? root.searchNeedle.split(/\s+/) : []
 
   function indexModel(parsed) {
     var act = parsed.active || []
@@ -487,11 +490,15 @@ Item {
     }
   }
   function searchHit(item) {
-    var q = root.searchNeedle
-    if (q.length === 0) return true
+    var toks = root.searchTokens
+    if (toks.length === 0) return true
     if (!item) return false
-    if (item._search === undefined) return true
-    return item._search.indexOf(q) !== -1
+    var hay = item._search
+    if (hay === undefined) return true
+    for (var i = 0; i < toks.length; i++) {
+      if (hay.indexOf(toks[i]) === -1) return false
+    }
+    return true
   }
   function activeMatches(item) {
     if (!item) return false

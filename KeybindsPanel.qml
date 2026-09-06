@@ -38,7 +38,43 @@ Item {
   property bool loading: false
   property string searchQuery: ""
   property bool recordingSearch: false
-  property string currentTab: "active" // "active" | "modified" | "catalog" | "conflicts" | "needskey"
+  property string currentTab: "active" // "active" | "modified" | "catalog" | "conflicts" | "needskey" | "ladder"
+
+  // The modifier ladder: how stock Omarchy decides between Shift, Ctrl, and Alt.
+  // Derived from /usr/share/omarchy/default/hypr/bindings/*.lua; the manual never spells it out.
+  readonly property var ladderRungs: [
+    { chord: "SUPER + key", rule: "Window and workspace verbs you use all day",
+      why: "Focus, close, fullscreen, float, group, jump to workspace, the menu, the terminal. Plus the universal clipboard on C, V, X.",
+      pairs: [["Super+W", "Close window"], ["Super+F", "Fullscreen"], ["Super+1…0", "Go to workspace"], ["Super+←→↑↓", "Focus window"]] },
+    { chord: "SUPER + SHIFT + key", rule: "On a letter: launch an app. On a nav key: move the window instead of the focus",
+      why: "Nearly all of applications.lua lives here. On arrows, numbers, and Tab, Shift flips the same verb from \"go there\" to \"take the window there\" or \"go backwards\".",
+      pairs: [["Super+Shift+B", "Browser"], ["Super+Shift+M", "Music"], ["Super+Shift+1", "Move window to workspace 1"], ["Super+Shift+←", "Swap window left"]] },
+    { chord: "SUPER + CTRL + key", rule: "System controls, panels, and toggles",
+      why: "Things you would otherwise click in the bar: Audio, Bluetooth, Display, Network, Power, Emojis, Clipboard manager, Capture, Reminder, Lock, Nightlight. Ctrl+1…9 opens the bar panels by position.",
+      pairs: [["Super+Ctrl+A", "Audio panel"], ["Super+Ctrl+V", "Clipboard manager"], ["Super+Ctrl+L", "Lock"], ["Super+Ctrl+Tab", "Former workspace"]] },
+    { chord: "SUPER + ALT + key", rule: "\"The other flavor\" of whatever it is added to",
+      why: "Alt never introduces a new idea. It picks the sibling: tmux instead of a plain terminal, the apps menu instead of the root menu, full-width instead of fullscreen, \"a little\" instead of the normal resize, group instead of focus.",
+      pairs: [["Super+Alt+Return", "Tmux (Super+Return is Terminal)"], ["Super+Alt+F", "Full width (Super+F is Fullscreen)"], ["Super+Alt+Space", "Apps menu (Super+Space is Menu)"], ["Super+Alt+-", "Resize a little (Super+- is normal)"]] },
+    { chord: "SUPER + SHIFT + ALT + key", rule: "Launcher overflow: the second app on a letter that is already taken",
+      why: "Same Shift launcher layer, Alt picks the sibling app. Every pair is a real cousin of the Shift binding.",
+      pairs: [["Shift+A / Shift+Alt+A", "ChatGPT / Grok"], ["Shift+G / Shift+Alt+G", "Signal / WhatsApp"], ["Shift+E / Shift+Alt+E", "Email / New email"], ["Shift+B / Shift+Alt+B", "Browser / Private browser"]] },
+    { chord: "SUPER + CTRL + ALT + key", rule: "Control overflow: the read-only or reset twin of a Ctrl control",
+      why: "Ctrl opens or sets something. Adding Alt shows or resets it, on the same letter.",
+      pairs: [["Ctrl+R / Ctrl+Alt+R", "Set reminder / Show reminders"], ["Ctrl+Z / Ctrl+Alt+Z", "Zoom in / Reset zoom"], ["Ctrl+B / Ctrl+Alt+B", "Bluetooth / Battery left"], ["Ctrl+D / Ctrl+Alt+D", "Display / Calendar"]] },
+    { chord: "SUPER + SHIFT + CTRL + key", rule: "Last resort: the third thing on a letter, or a destructive twin",
+      why: "Only seven bindings live here. Google Messages after Signal and WhatsApp on G. Agent after ChatGPT and Grok on A. Clear reminders next to Set and Show. Theme menu behind Menu and Background.",
+      pairs: [["Shift+Ctrl+G", "Google Messages"], ["Shift+Ctrl+R", "Clear reminders"], ["Shift+Ctrl+Space", "Theme menu"]] },
+    { chord: "ALT + TAB", rule: "No Super at all: muscle memory borrowed from Windows and Mac",
+      why: "Alt+Tab cycles windows, Ctrl+Alt+Tab cycles monitors, Ctrl+Alt+Delete closes everything, Print takes a screenshot. Shift and Alt on the XF86 media keys mean \"precise\" or \"switch device\".",
+      pairs: [] }
+  ]
+  readonly property var ladderComma: [
+    ["SUPER + comma", "Dismiss last notification", "the plain verb"],
+    ["SUPER + SHIFT + comma", "Dismiss all", "bigger scope"],
+    ["SUPER + CTRL + comma", "Toggle silencing", "a system toggle"],
+    ["SUPER + ALT + comma", "Invoke last notification", "the other flavor"],
+    ["SUPER + SHIFT + ALT + comma", "Open history", "overflow"]
+  ]
   property string currentCategory: "All"
   property string toastMessage: ""
   property bool toastVisible: false
@@ -890,6 +926,13 @@ Item {
               horizontalPadding: Style.space(16)
               onClicked: root.currentTab = "conflicts"
             }
+
+            Button {
+              text: "🪜 Modifier ladder"
+              selected: root.currentTab === "ladder"
+              horizontalPadding: Style.space(16)
+              onClicked: root.currentTab = "ladder"
+            }
           }
 
           Item { Layout.fillWidth: true }
@@ -897,7 +940,7 @@ Item {
 
         // 3. Category Filter Chips & Record to Find on the Right
         RowLayout {
-          visible: root.currentTab !== "conflicts"
+          visible: root.currentTab !== "conflicts" && root.currentTab !== "ladder"
           Layout.fillWidth: true
           spacing: Style.space(12)
 
@@ -1541,6 +1584,176 @@ Item {
                 font.pixelSize: Style.font.body
                 Layout.alignment: Qt.AlignHCenter
                 Layout.topMargin: Style.space(40)
+              }
+            }
+
+            // =========================================================
+            // --- TAB: MODIFIER LADDER (how stock picks Shift / Ctrl / Alt) ---
+            // =========================================================
+            ColumnLayout {
+              visible: root.currentTab === "ladder"
+              Layout.fillWidth: true
+              spacing: Style.space(12)
+
+              Text {
+                Layout.fillWidth: true
+                wrapMode: Text.WordWrap
+                text: "Super is the base and the letter is a mnemonic. Each extra modifier answers one question. The manual never spells this out, but the stock bindings follow it with very few exceptions, so a new key that fits the ladder will feel like it was always there."
+                color: Util.alpha(root.foreground, 0.75)
+                font.family: Style.font.family
+                font.pixelSize: Style.font.body
+              }
+
+              GridLayout {
+                Layout.fillWidth: true
+                columns: width > 1100 ? 2 : 1
+                columnSpacing: Style.space(12)
+                rowSpacing: Style.space(12)
+
+                Repeater {
+                  model: root.ladderRungs
+
+                  BorderSurface {
+                    id: rungCard
+                    required property var modelData
+                    Layout.fillWidth: true
+                    Layout.alignment: Qt.AlignTop
+                    implicitHeight: rungCol.implicitHeight + Style.space(32)
+                    radius: Style.cornerRadius
+                    color: Util.alpha(root.foreground, 0.03)
+                    borderSpec: Border.flat(Util.alpha(root.foreground, 0.12), 1)
+
+                    ColumnLayout {
+                      id: rungCol
+                      x: Style.space(16)
+                      y: Style.space(16)
+                      width: rungCard.width - Style.space(32)
+                      spacing: Style.space(8)
+
+                      KeyBadge {
+                        keyText: rungCard.modelData.chord
+                        highlighted: true
+                        fontSize: Style.font.body
+                      }
+
+                      Text {
+                        Layout.fillWidth: true
+                        wrapMode: Text.WordWrap
+                        text: rungCard.modelData.rule
+                        color: root.foreground
+                        font.family: Style.font.family
+                        font.pixelSize: Style.font.body
+                        font.bold: true
+                      }
+
+                      Text {
+                        Layout.fillWidth: true
+                        wrapMode: Text.WordWrap
+                        text: rungCard.modelData.why
+                        color: Util.alpha(root.foreground, 0.7)
+                        font.family: Style.font.family
+                        font.pixelSize: Style.font.caption
+                      }
+
+                      Rectangle {
+                        visible: rungCard.modelData.pairs.length > 0
+                        Layout.fillWidth: true
+                        Layout.preferredHeight: 1
+                        color: Util.alpha(root.foreground, 0.1)
+                      }
+
+                      GridLayout {
+                        visible: rungCard.modelData.pairs.length > 0
+                        Layout.fillWidth: true
+                        columns: 2
+                        columnSpacing: Style.space(14)
+                        rowSpacing: Style.space(3)
+
+                        Repeater {
+                          model: rungCard.modelData.pairs.length * 2
+
+                          Text {
+                            required property int index
+                            readonly property bool isChord: index % 2 === 0
+                            readonly property var pair: rungCard.modelData.pairs[Math.floor(index / 2)]
+                            Layout.fillWidth: !isChord
+                            wrapMode: isChord ? Text.NoWrap : Text.WordWrap
+                            text: isChord ? pair[0] : pair[1]
+                            color: isChord ? root.foreground : Util.alpha(root.foreground, 0.7)
+                            font.family: isChord ? Style.font.monoFamily || Style.font.family : Style.font.family
+                            font.pixelSize: Style.font.caption
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+
+              BorderSurface {
+                id: commaCard
+                Layout.fillWidth: true
+                implicitHeight: commaCol.implicitHeight + Style.space(32)
+                radius: Style.cornerRadius
+                color: Util.alpha(root.accent, 0.05)
+                borderSpec: Border.flat(Util.alpha(root.accent, 0.35), 1)
+
+                ColumnLayout {
+                  id: commaCol
+                  x: Style.space(16)
+                  y: Style.space(16)
+                  width: commaCard.width - Style.space(32)
+                  spacing: Style.space(8)
+
+                  Text {
+                    text: "ONE KEY, THE WHOLE LADDER"
+                    color: Util.alpha(root.foreground, 0.55)
+                    font.family: Style.font.family
+                    font.pixelSize: Style.font.caption
+                    font.bold: true
+                    font.letterSpacing: 1
+                  }
+
+                  Text {
+                    Layout.fillWidth: true
+                    wrapMode: Text.WordWrap
+                    text: "Notifications on comma (stock). One key, five modifier combinations, each answering a different question about the same noun."
+                    color: root.foreground
+                    font.family: Style.font.family
+                    font.pixelSize: Style.font.body
+                  }
+
+                  Repeater {
+                    model: root.ladderComma
+
+                    RowLayout {
+                      required property var modelData
+                      Layout.fillWidth: true
+                      spacing: Style.space(12)
+
+                      KeyBadge {
+                        keyText: modelData[0]
+                        Layout.preferredWidth: Style.space(260)
+                      }
+
+                      Text {
+                        Layout.fillWidth: true
+                        text: modelData[1]
+                        color: root.foreground
+                        font.family: Style.font.family
+                        font.pixelSize: Style.font.caption
+                      }
+
+                      Text {
+                        text: modelData[2]
+                        color: Util.alpha(root.accent, 0.9)
+                        font.family: Style.font.family
+                        font.pixelSize: Style.font.caption
+                        font.italic: true
+                      }
+                    }
+                  }
+                }
               }
             }
 

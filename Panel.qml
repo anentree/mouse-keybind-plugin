@@ -9,8 +9,8 @@ import "Model.js" as Model
 
 Panel {
   id: root
-  moduleName: "davedes.mouse-keybind-settings"
-  ipcTarget: "davedes.mouse-keybind-settings"
+  moduleName: "io.github.anentree.mouse-keybind-settings"
+  ipcTarget: "io.github.anentree.mouse-keybind-settings"
   manageIpc: false
 
   implicitWidth: button.implicitWidth
@@ -56,7 +56,7 @@ Panel {
   }
 
   readonly property string settingsDir: Quickshell.env("HOME") + "/.local/state/omarchy/settings"
-  readonly property string settingsPath: root.settingsDir + "/davedes.mouse-keybind-settings.json"
+  readonly property string settingsPath: root.settingsDir + "/io.github.anentree.mouse-keybind-settings.json"
 
   function setShowBuyButton(v) {
     root.showBuyButton = !!v
@@ -286,7 +286,7 @@ Panel {
   }
 
   function summonKeybindManager() {
-    summonKbProc.command = ["omarchy-shell", "shell", "summon", "davedes.mouse-keybind-settings", "{}"]
+    summonKbProc.command = ["omarchy-shell", "shell", "summon", "io.github.anentree.mouse-keybind-settings", "{}"]
     summonKbProc.running = true
     root.close()
   }
@@ -296,7 +296,7 @@ Panel {
   function requestEditKeybinding(row) {
     var r = (typeof row === "string") ? { key: row } : (row || {})
     var payload = JSON.stringify({ edit: r.key || "", id: Model.rowId(r) })
-    summonKbProc.command = ["omarchy-shell", "shell", "summon", "davedes.mouse-keybind-settings", payload]
+    summonKbProc.command = ["omarchy-shell", "shell", "summon", "io.github.anentree.mouse-keybind-settings", payload]
     summonKbProc.running = true
     root.close()
   }
@@ -434,7 +434,7 @@ Panel {
   BoundedProcess {
     id: keybindSummaryProc
     command: [
-      Quickshell.env("HOME") + "/.config/omarchy/plugins/davedes.mouse-keybind-settings/backend/keybinds_manager.py",
+      Quickshell.env("HOME") + "/.config/omarchy/plugins/io.github.anentree.mouse-keybind-settings/backend/keybinds_manager.py",
       "list"
     ]
     maxBytes: 262144

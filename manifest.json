@@ -1,11 +1,11 @@
 {
   "schemaVersion": 1,
-  "id": "davedes.mouse-keybind-settings",
+  "id": "io.github.anentree.mouse-keybind-settings",
   "name": "Mouse & Keybind Settings",
-  "version": "1.0.0",
-  "author": "davedes",
+  "version": "1.1.0",
+  "author": "anentree (fork of davedes)",
   "license": "MIT",
-  "description": "Combined graphical configuration for mouse/pointer settings and Hyprland keybindings — cursor speed, acceleration profiles, scroll behavior, button remapping, synthetic button presses, battery indicator, and full keybind manager.",
+  "description": "Mouse/pointer settings and a Hyprland keybinding manager that edits bindings by identity in one managed block, rehomes conflicting keys, and searches instantly.",
   "kinds": [
     "bar-widget",
     "panel"

@@ -58,7 +58,7 @@ Item {
   property color accent: Color.accent
   property color urgent: Color.urgent
 
-  readonly property string backendPath: Quickshell.env("HOME") + "/.config/omarchy/plugins/davedes.mouse-keybind-settings/backend/keybinds_manager.py"
+  readonly property string backendPath: Quickshell.env("HOME") + "/.config/omarchy/plugins/io.github.anentree.mouse-keybind-settings/backend/keybinds_manager.py"
 
   signal saved(string key, string description, string command, string action, string oldKey, string id)
   signal canceled()

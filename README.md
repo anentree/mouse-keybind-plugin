@@ -6,7 +6,48 @@
 
 All in a single toolbar widget with one icon giving you access to both, pointer configuration and Hyprland keybinding management.
 
-Plugin ID: `davedes.mouse-keybind-settings`
+Plugin ID: `io.github.anentree.mouse-keybind-settings`
+
+## About this fork
+
+This is a fork of [Davedes83/mouse-keybind-plugin](https://github.com/Davedes83/mouse-keybind-plugin) (MIT) by
+anentree. The mouse and pointer half is unchanged. The keybinding manager was reworked
+after a swap between two bindings turned out to be impossible with the original save logic.
+
+What changed:
+
+- **Saving never deletes another binding.** The plugin now owns one marked block at the
+  end of `~/.config/hypr/bindings.lua`, regenerated from binding identities. Your
+  hand-written lines are read but never rewritten. Swaps work in any order.
+- **Conflicts rehome instead of silently overriding.** Save onto a taken key and the other
+  binding is displaced, then its dialog opens and stays until you pick a new key or
+  explicitly disable it. A "Needs key" tab lists anything still waiting. A gear in the
+  header switches between rehome (default), ask, and override.
+- **The key recorder respects you.** Modifier pills you toggle stay on, held modifiers are
+  added when you press a key, modifier-only presses can no longer be saved as a chord, and
+  Super chords (which Hyprland grabs before the window sees them) are explained instead of
+  mis-recorded.
+- **Instant search** that matches every typed word in any order ("focus right" finds
+  "Focus on right window").
+- **Modifier ladder tab** explaining how stock Omarchy chooses Shift, Ctrl, and Alt.
+- Narrow windows wrap the tabs and scroll sideways instead of clipping.
+- Backend: `check` (pure preview), `set --id --displace`, `migrate`; 26 tests
+  (`cd tests && python3 test_backend.py`).
+
+Install:
+
+```bash
+omarchy plugin add https://github.com/anentree/mouse-keybind-plugin.git --enable
+```
+
+Remove:
+
+```bash
+omarchy plugin remove io.github.anentree.mouse-keybind-settings
+```
+
+Removing the plugin leaves the managed block in `bindings.lua`; delete the lines between
+`-- [[ OMARCHY_KEYBINDS_START ]]` and `-- [[ OMARCHY_KEYBINDS_END ]]` to return to stock.
 
 ## Features
 
@@ -20,8 +61,8 @@ Clone the repository into your user plugins directory and enable it:
 
 ```bash
 git clone https://github.com/Davedes83/mouse-keybind-plugin \
-  ~/.config/omarchy/plugins/davedes.mouse-keybind-settings
-omarchy plugin add ~/.config/omarchy/plugins/davedes.mouse-keybind-settings --enable
+  ~/.config/omarchy/plugins/io.github.anentree.mouse-keybind-settings
+omarchy plugin add ~/.config/omarchy/plugins/io.github.anentree.mouse-keybind-settings --enable
 ```
 
 Or install it directly from the repo URL:
@@ -64,10 +105,10 @@ Left-click the toolbar icon to open the settings popup. Switch between the **Mou
 ### CLI
 
 Replace `$HOME` with your home directory; the plugin lives by default at
-`~/.config/omarchy/plugins/davedes.mouse-keybind-settings/`.
+`~/.config/omarchy/plugins/io.github.anentree.mouse-keybind-settings/`.
 
 ```bash
-P="$HOME/.config/omarchy/plugins/davedes.mouse-keybind-settings"
+P="$HOME/.config/omarchy/plugins/io.github.anentree.mouse-keybind-settings"
 
 # Mouse
 python3 "$P/mouse_ctl.py" status
@@ -86,9 +127,9 @@ python3 "$P/mouse_ctl.py" simulate-button --button side_back
 ### IPC
 
 ```bash
-omarchy-shell davedes.mouse-keybind-settings toggle
-omarchy-shell davedes.mouse-keybind-settings toggleAccel
-omarchy-shell shell summon davedes.mouse-keybind-settings '{}'
+omarchy-shell io.github.anentree.mouse-keybind-settings toggle
+omarchy-shell io.github.anentree.mouse-keybind-settings toggleAccel
+omarchy-shell shell summon io.github.anentree.mouse-keybind-settings '{}'
 ```
 
 ## License

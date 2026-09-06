@@ -21,9 +21,9 @@ Item {
   readonly property color accent: Color.accent
   readonly property color urgent: Color.urgent
 
-  readonly property string backendPath: Quickshell.env("HOME") + "/.config/omarchy/plugins/davedes.mouse-keybind-settings/backend/keybinds_manager.py"
+  readonly property string backendPath: Quickshell.env("HOME") + "/.config/omarchy/plugins/io.github.anentree.mouse-keybind-settings/backend/keybinds_manager.py"
   readonly property string settingsDir: Quickshell.env("HOME") + "/.local/state/omarchy/settings"
-  readonly property string settingsPath: root.settingsDir + "/davedes.mouse-keybind-settings.json"
+  readonly property string settingsPath: root.settingsDir + "/io.github.anentree.mouse-keybind-settings.json"
 
   // State
   property var modelData: ({
@@ -164,7 +164,7 @@ Item {
 
   function requestClose() {
     if (root.shell && typeof root.shell.hide === "function") {
-      root.shell.hide((root.manifest && root.manifest.id) || "davedes.mouse-keybind-settings")
+      root.shell.hide((root.manifest && root.manifest.id) || "io.github.anentree.mouse-keybind-settings")
     } else {
       window.visible = false
     }
@@ -714,7 +714,7 @@ Item {
 
     onVisibleChanged: {
       if (!visible && !root.closingFromHost && root.shell && typeof root.shell.hide === "function") {
-        root.shell.hide((root.manifest && root.manifest.id) || "davedes.mouse-keybind-settings")
+        root.shell.hide((root.manifest && root.manifest.id) || "io.github.anentree.mouse-keybind-settings")
       }
     }
 

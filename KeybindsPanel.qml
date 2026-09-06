@@ -38,7 +38,7 @@ Item {
   property bool loading: false
   property string searchQuery: ""
   property bool recordingSearch: false
-  property string currentTab: "active" // "active" | "modified" | "catalog" | "conflicts"
+  property string currentTab: "active" // "active" | "modified" | "catalog" | "conflicts" | "needskey"
   property string currentCategory: "All"
   property string toastMessage: ""
   property bool toastVisible: false
@@ -474,6 +474,10 @@ Item {
   readonly property var allActive: root.modelData.active || []
   readonly property var allCatalog: root.modelData.catalog || []
   readonly property var allModified: root.allActive.filter(function(r) { return r.status === "modified" || r.status === "custom" })
+  // Bindings that lost their chord to another binding and still need a new one
+  readonly property var allNeedsKey: root.allActive.filter(function(r) { return root.needsKeyInfo(r).needs })
+  function needsKeyMatches(item) { return Boolean(item) && root.needsKeyInfo(item).needs && root.searchHit(item) }
+  readonly property var filteredNeedsKey: root.allNeedsKey.filter(root.needsKeyMatches)
 
   // Match lists: only used for counts and empty states
   readonly property var filteredActive: root.allActive.filter(root.activeMatches)
@@ -865,6 +869,14 @@ Item {
             }
 
             Button {
+              text: "🔑 Needs key (" + root.allNeedsKey.length + ")"
+              selected: root.currentTab === "needskey"
+              accent: (root.allNeedsKey.length > 0) ? "#FF9800" : root.foreground
+              horizontalPadding: Style.space(16)
+              onClicked: root.currentTab = "needskey"
+            }
+
+            Button {
               text: "Available Actions Catalog (" + ((root.modelData.catalog && root.modelData.catalog.length) || 0) + ")"
               selected: root.currentTab === "catalog"
               horizontalPadding: Style.space(16)
@@ -973,7 +985,7 @@ Item {
             // --- TAB 1: ALL ACTIVE KEYBINDINGS (ALPHABETICAL) ---
             // =========================================================
             ColumnLayout {
-              visible: root.currentTab === "active"
+              visible: root.currentTab === "active" || root.currentTab === "needskey"
               Layout.fillWidth: true
               spacing: Style.space(8)
 
@@ -983,7 +995,7 @@ Item {
                 BorderSurface {
                   id: activeRow
                   required property var modelData
-                  visible: root.activeMatches(activeRow.modelData)
+                  visible: root.currentTab === "needskey" ? root.needsKeyMatches(activeRow.modelData) : root.activeMatches(activeRow.modelData)
                   readonly property var needsKey: root.needsKeyInfo(activeRow.modelData)
                   readonly property bool isDisabled: Boolean(activeRow.modelData && activeRow.modelData.status === "disabled")
                   readonly property string rowId: Model.rowId(activeRow.modelData)
@@ -1188,9 +1200,9 @@ Item {
                 }
               }
 
-              // Empty state for active list
+              // Empty state for active / needs-key list
               BorderSurface {
-                visible: root.filteredActive.length === 0
+                visible: root.currentTab === "needskey" ? root.filteredNeedsKey.length === 0 : root.filteredActive.length === 0
                 Layout.fillWidth: true
                 Layout.preferredHeight: Style.space(170)
                 radius: Style.cornerRadius
@@ -1202,9 +1214,11 @@ Item {
                   spacing: Style.space(10)
 
                   Text {
-                    text: root.searchQuery.length > 0
-                      ? ("No keybinding found for \"" + root.searchQuery + "\"")
-                      : "No keybindings match your filter."
+                    text: root.currentTab === "needskey"
+                      ? (root.allNeedsKey.length === 0 ? "Every binding has a key. Nothing to do here." : "No binding waiting for a key matches your search.")
+                      : root.searchQuery.length > 0
+                        ? ("No keybinding found for \"" + root.searchQuery + "\"")
+                        : "No keybindings match your filter."
                     textFormat: Text.PlainText
                     color: root.foreground
                     font.family: Style.font.family
@@ -1214,7 +1228,7 @@ Item {
                   }
 
                   Text {
-                    visible: root.searchQuery.length > 0
+                    visible: root.searchQuery.length > 0 && root.currentTab !== "needskey"
                     text: "This shortcut combination is currently free and unassigned."
                     color: Util.alpha(root.foreground, 0.6)
                     font.family: Style.font.family

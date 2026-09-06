@@ -724,7 +724,7 @@ Panel {
                   }
                   Item { Layout.fillWidth: true }
                   Text {
-                    text: Model.formatSpeed(root.status.sensitivity)
+                    text: Model.formatSpeed(speedSlider.dragging ? speedSlider.liveValue : root.status.sensitivity)
                     color: Color.accent
                     font.family: root.fontFamily
                     font.pixelSize: Style.font.caption
@@ -738,7 +738,8 @@ Panel {
 
                   Text { text: "🐢"; font.pixelSize: Style.font.caption; Layout.alignment: Qt.AlignVCenter }
 
-                  PanelSlider {
+                  SpeedSlider {
+                    id: speedSlider
                     Layout.fillWidth: true
                     bar: root.bar
                     minimum: -1.0
@@ -871,7 +872,7 @@ Panel {
                   }
                   Item { Layout.fillWidth: true }
                   Text {
-                    text: Model.formatScrollSpeed(root.status.scroll_factor)
+                    text: Model.formatScrollSpeed(scrollSlider.dragging ? scrollSlider.liveValue : root.status.scroll_factor)
                     color: Color.accent
                     font.family: root.fontFamily
                     font.pixelSize: Style.font.caption
@@ -885,7 +886,8 @@ Panel {
 
                   Text { text: "🐌"; font.pixelSize: Style.font.caption; Layout.alignment: Qt.AlignVCenter }
 
-                  PanelSlider {
+                  SpeedSlider {
+                    id: scrollSlider
                     Layout.fillWidth: true
                     bar: root.bar
                     minimum: 0.2

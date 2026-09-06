@@ -120,6 +120,7 @@ Item {
   function open(payloadJson) {
     closingFromHost = false
     window.visible = true
+    root.bringToFront()
     root.pendingEditKey = ""
     root.pendingEditId = ""
     if (payloadJson && payloadJson.trim().length > 0) {
@@ -155,6 +156,29 @@ Item {
       }
       if (row) editDialog.openEdit(row)
     }
+  }
+
+  // A keepLoaded panel keeps one window for the whole shell session, so it
+  // stays on whichever workspace it was first shown on (and in a tiled layout
+  // it can sit off-screen). On every open, move it to the active workspace,
+  // float it, centre it and focus it. Hyprland 0.56 dispatchers are Lua.
+  function bringToFront() {
+    if (bringProc.running) return
+    bringProc.command = ["bash", "-c",
+      'for i in $(seq 1 40); do addr=$(hyprctl clients -j 2>/dev/null | jq -r \'.[] | select(.class=="org.quickshell" and .title=="Keybindings") | .address\' | head -1); [ -n "$addr" ] && break; sleep 0.05; done; ' +
+      '[ -n "$addr" ] || exit 0; ws=$(hyprctl activeworkspace -j | jq -r .id); ' +
+      'cur=$(hyprctl clients -j | jq -r --arg a "$addr" \'.[] | select(.address==$a) | .workspace.id\'); ' +
+      'hyprctl dispatch "hl.dsp.focus({ window = \\"address:$addr\\" })" >/dev/null; ' +
+      '[ "$cur" != "$ws" ] && hyprctl dispatch "hl.dsp.window.move({ workspace = \\"$ws\\" })" >/dev/null; ' +
+      'hyprctl dispatch "hl.dsp.window.float({ action = \\"on\\" })" >/dev/null; ' +
+      'hyprctl dispatch "hl.dsp.window.center()" >/dev/null; true']
+    bringProc.running = true
+  }
+
+  BoundedProcess {
+    id: bringProc
+    maxBytes: 8192
+    timeoutMs: 5000
   }
 
   function close() {

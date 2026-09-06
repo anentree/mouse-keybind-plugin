@@ -39,6 +39,8 @@ Item {
   property string searchQuery: ""
   property bool recordingSearch: false
   property string currentTab: "active" // "active" | "modified" | "catalog" | "conflicts" | "needskey" | "ladder"
+  // Compact labels and wrapping when the window is narrower than the full layout
+  readonly property bool narrow: window.width < Style.space(1180)
 
   // The modifier ladder: how stock Omarchy decides between Shift, Ctrl, and Alt.
   // Derived from /usr/share/omarchy/default/hypr/bindings/*.lua; the manual never spells it out.
@@ -801,6 +803,7 @@ Item {
               }
 
               Text {
+                visible: !root.narrow
                 text: "Hyprland Shortcut Manager"
                 color: Util.alpha(root.foreground, 0.55)
                 font.family: Style.font.family
@@ -812,6 +815,7 @@ Item {
           // Search Bar (Expands flexibly to fill available width)
           Item {
             Layout.fillWidth: true
+            Layout.minimumWidth: Style.space(140)
             Layout.preferredHeight: Style.space(38)
 
             TextField {
@@ -847,7 +851,7 @@ Item {
             spacing: Style.space(8)
 
             Button {
-              text: "Add Keybinding"
+              text: root.narrow ? "Add" : "Add Keybinding"
               iconText: "➕"
               accent: root.accent
               selected: true
@@ -881,61 +885,55 @@ Item {
           }
         }
 
-        // 2. Navigation Tabs (All Active vs Modified vs Catalog vs Conflicts)
-        RowLayout {
+        // 2. Navigation Tabs (wrap onto more lines when the window is narrow)
+        Flow {
           Layout.fillWidth: true
-          spacing: Style.space(12)
+          spacing: Style.space(8)
 
-          ButtonGroup {
-            id: tabGroup
-
-            Button {
-              text: "All Active (" + (root.modelData.total_active || 0) + ")"
-              selected: root.currentTab === "active"
-              horizontalPadding: Style.space(16)
-              onClicked: root.currentTab = "active"
-            }
-
-            Button {
-              text: "⭐ Modified & Custom (" + (root.modelData.total_modified || 0) + ")"
-              selected: root.currentTab === "modified"
-              accent: (root.modelData.total_modified > 0) ? "#FF9800" : root.foreground
-              horizontalPadding: Style.space(16)
-              onClicked: root.currentTab = "modified"
-            }
-
-            Button {
-              text: "🔑 Needs key (" + root.allNeedsKey.length + ")"
-              selected: root.currentTab === "needskey"
-              accent: (root.allNeedsKey.length > 0) ? "#FF9800" : root.foreground
-              horizontalPadding: Style.space(16)
-              onClicked: root.currentTab = "needskey"
-            }
-
-            Button {
-              text: "Available Actions Catalog (" + ((root.modelData.catalog && root.modelData.catalog.length) || 0) + ")"
-              selected: root.currentTab === "catalog"
-              horizontalPadding: Style.space(16)
-              onClicked: root.currentTab = "catalog"
-            }
-
-            Button {
-              text: "⚠️ Conflicts (" + (root.modelData.total_conflicts || 0) + ")"
-              selected: root.currentTab === "conflicts"
-              accent: (root.modelData.total_conflicts > 0) ? root.urgent : root.foreground
-              horizontalPadding: Style.space(16)
-              onClicked: root.currentTab = "conflicts"
-            }
-
-            Button {
-              text: "🪜 Modifier ladder"
-              selected: root.currentTab === "ladder"
-              horizontalPadding: Style.space(16)
-              onClicked: root.currentTab = "ladder"
-            }
+          Button {
+            text: (root.narrow ? "All (" : "All Active (") + (root.modelData.total_active || 0) + ")"
+            selected: root.currentTab === "active"
+            horizontalPadding: Style.space(root.narrow ? 12 : 16)
+            onClicked: root.currentTab = "active"
           }
 
-          Item { Layout.fillWidth: true }
+          Button {
+            text: (root.narrow ? "⭐ Modified (" : "⭐ Modified & Custom (") + (root.modelData.total_modified || 0) + ")"
+            selected: root.currentTab === "modified"
+            accent: (root.modelData.total_modified > 0) ? "#FF9800" : root.foreground
+            horizontalPadding: Style.space(root.narrow ? 12 : 16)
+            onClicked: root.currentTab = "modified"
+          }
+
+          Button {
+            text: "🔑 Needs key (" + root.allNeedsKey.length + ")"
+            selected: root.currentTab === "needskey"
+            accent: (root.allNeedsKey.length > 0) ? "#FF9800" : root.foreground
+            horizontalPadding: Style.space(root.narrow ? 12 : 16)
+            onClicked: root.currentTab = "needskey"
+          }
+
+          Button {
+            text: (root.narrow ? "Catalog (" : "Available Actions Catalog (") + ((root.modelData.catalog && root.modelData.catalog.length) || 0) + ")"
+            selected: root.currentTab === "catalog"
+            horizontalPadding: Style.space(root.narrow ? 12 : 16)
+            onClicked: root.currentTab = "catalog"
+          }
+
+          Button {
+            text: "⚠️ Conflicts (" + (root.modelData.total_conflicts || 0) + ")"
+            selected: root.currentTab === "conflicts"
+            accent: (root.modelData.total_conflicts > 0) ? root.urgent : root.foreground
+            horizontalPadding: Style.space(root.narrow ? 12 : 16)
+            onClicked: root.currentTab = "conflicts"
+          }
+
+          Button {
+            text: root.narrow ? "🪜 Ladder" : "🪜 Modifier ladder"
+            selected: root.currentTab === "ladder"
+            horizontalPadding: Style.space(root.narrow ? 12 : 16)
+            onClicked: root.currentTab = "ladder"
+          }
         }
 
         // 3. Category Filter Chips & Record to Find on the Right

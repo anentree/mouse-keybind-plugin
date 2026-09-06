@@ -646,7 +646,8 @@ class TestRealFileCopy(Base):
     def setUp(self):
         super().setUp()
         shutil.copyfile(REAL_USER_FILE, self.user_file)
-        self.original = self.read_user()
+        # the real file may already carry a managed block; "untouched" means everything outside it
+        self.original = _outside_of(self.read_user())
 
     def _trailing_count(self, text):
         n = 0

@@ -502,7 +502,7 @@ def _build_action(command: str, action: str = "") -> str:
     """Turn the CLI's (command, action) pair into verbatim Lua action text."""
     for cand in (action, command):
         c = (cand or "").strip().replace("\r", " ").replace("\n", " ")
-        if c.startswith("{") or c.startswith("hl.") or c.startswith("function"):
+        if c.startswith("{") or c.startswith("hl.") or c.startswith("function") or re.match(r"^[A-Za-z_][\w.]*\s*\(", c):
             return c[:MAX_CMD_LEN]
     raw = (command or action or "").strip()
     if (raw.startswith('"') and raw.endswith('"')) or (raw.startswith("'") and raw.endswith("'")):
@@ -598,8 +598,8 @@ def normalize_key_chord(key_chord: str) -> str:
             main_key = upper_k
         elif upper_k.startswith("F") and upper_k[1:].isdigit():
             main_key = upper_k
-        elif main_key in ("comma", "period", "slash", "minus", "equal", "bracketleft", "bracketright", "semicolon", "apostrophe", "backslash"):
-            pass
+        elif main_key.lower() in ("comma", "period", "slash", "minus", "equal", "bracketleft", "bracketright", "semicolon", "apostrophe", "backslash", "grave"):
+            main_key = main_key.lower()   # Hyprland resolves keysyms case-insensitively; one canonical spelling
         elif len(main_key) == 1:
             main_key = main_key.upper()
     if mods and main_key:
@@ -1267,7 +1267,7 @@ def _resolve_row(rows, token, rec_id=None, default_key=""):
 
 def _resolve_set_id(rows, description, old_key="", rec_id=None):
     if rec_id:
-        return _make_id(rec_id) if _make_id(rec_id) in rows else rec_id
+        return _make_id(rec_id) if (_make_id(rec_id) in rows or "@" not in rec_id) else rec_id
     did = _make_id(description)
     if did in rows:
         return did
@@ -1396,7 +1396,11 @@ def set_keybinding(key, description, command, action="", old_key="", rec_id=None
     description = description.strip()
     ctx, records, rows = _load_all()
     rid = _resolve_set_id(rows, description, old_key, rec_id)
-    lua_action = _build_action(command, action)
+    row = rows.get(rid)
+    if command or action:
+        lua_action = _build_action(command, action)
+    else:
+        lua_action = row["action"] if row else '""'
     plan = _plan_set(ctx, records, rows, rid, norm_key, description, lua_action, displace)
     if plan["conflict"] and not displace:
         return {

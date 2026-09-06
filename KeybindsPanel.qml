@@ -428,85 +428,57 @@ Item {
     root.runSet(true)
   }
 
-  // Filtered active bindings (sorted alphabetically)
-  readonly property var filteredActive: {
-    var list = root.modelData.active || []
-    var q = root.searchQuery.trim().toLowerCase()
-    var cat = root.currentCategory
+  // --- Search -------------------------------------------------------------
+  // The row delegates are created once per model load and only toggle
+  // `visible` while you type: filtering is one indexOf per row against a
+  // lowercase haystack precomputed when the backend JSON arrives, so a
+  // keystroke never rebuilds the list.
+  property string lastListJson: ""
+  readonly property string searchNeedle: root.searchQuery.trim().toLowerCase()
 
-    var res = []
-    for (var i = 0; i < list.length; i++) {
-      var item = list[i]
-
-      // Category filter
-      if (cat !== "All" && item.category !== cat) continue
-
-      // Search filter
-      if (q.length > 0) {
-        var matchKey = item.key && item.key.toLowerCase().indexOf(q) !== -1
-        var matchDesc = item.description && item.description.toLowerCase().indexOf(q) !== -1
-        var matchCmd = (item.command && item.command.toLowerCase().indexOf(q) !== -1) ||
-                       (item.action && item.action.toLowerCase().indexOf(q) !== -1)
-        var matchCat = item.category && item.category.toLowerCase().indexOf(q) !== -1
-
-        if (!matchKey && !matchDesc && !matchCmd && !matchCat) continue
-      }
-
-      res.push(item)
+  function indexModel(parsed) {
+    var act = parsed.active || []
+    for (var i = 0; i < act.length; i++) {
+      var r = act[i]
+      r._search = [r.key, r.description, r.command, r.action, r.category].join("\n").toLowerCase()
     }
-    return res
+    var cat = parsed.catalog || []
+    for (var j = 0; j < cat.length; j++) {
+      var c = cat[j]
+      c._search = [c.name, c.description, c.default_key].join("\n").toLowerCase()
+    }
+  }
+  function searchHit(item) {
+    var q = root.searchNeedle
+    if (q.length === 0) return true
+    if (!item) return false
+    if (item._search === undefined) return true
+    return item._search.indexOf(q) !== -1
+  }
+  function activeMatches(item) {
+    if (!item) return false
+    if (root.currentCategory !== "All" && item.category !== root.currentCategory) return false
+    return root.searchHit(item)
+  }
+  function modifiedMatches(item) {
+    if (!item || (item.status !== "modified" && item.status !== "custom")) return false
+    return root.activeMatches(item)
+  }
+  function catalogMatches(item) {
+    if (!item) return false
+    if (root.currentCategory !== "All" && item.category !== root.currentCategory) return false
+    return root.searchHit(item)
   }
 
-  // Filtered modified & custom bindings
-  readonly property var filteredModified: {
-    var list = root.modelData.active || []
-    var q = root.searchQuery.trim().toLowerCase()
-    var cat = root.currentCategory
+  // Stable models for the repeaters (delegates live for the whole model load)
+  readonly property var allActive: root.modelData.active || []
+  readonly property var allCatalog: root.modelData.catalog || []
+  readonly property var allModified: root.allActive.filter(function(r) { return r.status === "modified" || r.status === "custom" })
 
-    var res = []
-    for (var i = 0; i < list.length; i++) {
-      var item = list[i]
-      if (item.status !== "modified" && item.status !== "custom") continue
-      if (cat !== "All" && item.category !== cat) continue
-
-      if (q.length > 0) {
-        var matchKey = item.key && item.key.toLowerCase().indexOf(q) !== -1
-        var matchDesc = item.description && item.description.toLowerCase().indexOf(q) !== -1
-        var matchCmd = (item.command && item.command.toLowerCase().indexOf(q) !== -1) ||
-                       (item.action && item.action.toLowerCase().indexOf(q) !== -1)
-        var matchCat = item.category && item.category.toLowerCase().indexOf(q) !== -1
-
-        if (!matchKey && !matchDesc && !matchCmd && !matchCat) continue
-      }
-
-      res.push(item)
-    }
-    return res
-  }
-
-  // Filtered catalog presets
-  readonly property var filteredCatalog: {
-    var list = root.modelData.catalog || []
-    var q = root.searchQuery.trim().toLowerCase()
-    var cat = root.currentCategory
-
-    var res = []
-    for (var i = 0; i < list.length; i++) {
-      var item = list[i]
-
-      if (cat !== "All" && item.category !== cat) continue
-
-      if (q.length > 0) {
-        var matchName = item.name && item.name.toLowerCase().indexOf(q) !== -1
-        var matchDesc = item.description && item.description.toLowerCase().indexOf(q) !== -1
-        var matchKey = item.default_key && item.default_key.toLowerCase().indexOf(q) !== -1
-        if (!matchName && !matchDesc && !matchKey) continue
-      }
-
-      res.push(item)
-    }
-    return res
-  }
+  // Match lists: only used for counts and empty states
+  readonly property var filteredActive: root.allActive.filter(root.activeMatches)
+  readonly property var filteredModified: root.allActive.filter(root.modifiedMatches)
+  readonly property var filteredCatalog: root.allCatalog.filter(root.catalogMatches)
 
   // Filtered conflicts
   readonly property var filteredConflicts: {
@@ -538,8 +510,14 @@ Item {
         var text = stdout || ""
         if (text && text.trim().length > 0) {
           try {
-            var parsed = JSON.parse(text)
-            if (parsed) root.modelData = parsed
+            if (text !== root.lastListJson) {
+              var parsed = JSON.parse(text)
+              if (parsed) {
+                root.indexModel(parsed)
+                root.lastListJson = text
+                root.modelData = parsed
+              }
+            }
           } catch (e) {
             console.warn("KeybindsPanel: Failed to parse backend json:", e)
           }
@@ -1000,11 +978,12 @@ Item {
               spacing: Style.space(8)
 
               Repeater {
-                model: root.filteredActive
+                model: root.allActive
 
                 BorderSurface {
                   id: activeRow
                   required property var modelData
+                  visible: root.activeMatches(activeRow.modelData)
                   readonly property var needsKey: root.needsKeyInfo(activeRow.modelData)
                   readonly property bool isDisabled: Boolean(activeRow.modelData && activeRow.modelData.status === "disabled")
                   readonly property string rowId: Model.rowId(activeRow.modelData)
@@ -1269,11 +1248,12 @@ Item {
               spacing: Style.space(8)
 
               Repeater {
-                model: root.filteredModified
+                model: root.allModified
 
                 BorderSurface {
                   id: modRow
                   required property var modelData
+                  visible: root.activeMatches(modRow.modelData)
                   Layout.fillWidth: true
                   Layout.preferredHeight: Style.space(64)
                   radius: Style.cornerRadius
@@ -1429,11 +1409,12 @@ Item {
               spacing: Style.space(8)
 
               Repeater {
-                model: root.filteredCatalog
+                model: root.allCatalog
 
                 BorderSurface {
                   id: catalogRow
                   required property var modelData
+                  visible: root.catalogMatches(catalogRow.modelData)
                   Layout.fillWidth: true
                   Layout.preferredHeight: Style.space(60)
                   radius: Style.cornerRadius

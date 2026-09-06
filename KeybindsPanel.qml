@@ -703,7 +703,7 @@ Item {
     color: root.background
     implicitWidth: Style.space(1000)
     implicitHeight: Style.space(760)
-    minimumSize: Qt.size(Style.space(700), Style.space(520))
+    minimumSize: Qt.size(Style.space(380), Style.space(360))
 
     onVisibleChanged: {
       if (!visible && !root.closingFromHost && root.shell && typeof root.shell.hide === "function") {
@@ -769,9 +769,37 @@ Item {
         event.accepted = true
       }
 
-      ColumnLayout {
+      // Horizontal scroller: when the window is narrower than the page's
+      // minimum layout width, the page scrolls sideways instead of clipping.
+      Flickable {
+        id: pageFlick
         anchors.fill: parent
         anchors.margins: Style.space(22)
+        clip: true
+        flickableDirection: Flickable.HorizontalFlick
+        boundsBehavior: Flickable.StopAtBounds
+        contentWidth: pageCol.width
+        contentHeight: height
+        interactive: contentWidth > width
+
+        ScrollBar.horizontal: ScrollBar {
+          policy: pageFlick.contentWidth > pageFlick.width ? ScrollBar.AlwaysOn : ScrollBar.AlwaysOff
+        }
+
+        // Shift+wheel (or a horizontal wheel) pans sideways; plain wheel goes to the list below
+        WheelHandler {
+          acceptedModifiers: Qt.ShiftModifier
+          enabled: pageFlick.contentWidth > pageFlick.width
+          onWheel: function(event) {
+            var d = event.angleDelta.x !== 0 ? event.angleDelta.x : event.angleDelta.y
+            pageFlick.contentX = Math.max(0, Math.min(pageFlick.contentWidth - pageFlick.width, pageFlick.contentX - d))
+          }
+        }
+
+      ColumnLayout {
+        id: pageCol
+        width: Math.max(pageFlick.width, pageCol.Layout.minimumWidth)
+        height: pageFlick.height
         spacing: Style.space(16)
 
         // 1. Top Header Bar with Clean Layout
@@ -1924,6 +1952,7 @@ Item {
             }
           }
         }
+      }
       }
 
       // Add / Edit / Rehome Modal Dialog (child of mainContainer, fills the window)

@@ -36,6 +36,9 @@ Item {
   property string actionType: "preset" // "preset" | "custom"
   // Stable identity passed to the backend as --id ("" for brand-new custom rows).
   property string bindingId: ""
+  // Catalog preset's Lua dispatcher (e.g. hl.dsp.window.close()); "" for exec
+  // presets and custom/edited rows. Sent as `action` instead of `command`.
+  property string actionDispatcher: ""
   // Description snapshot at open time (self-conflict exclusion).
   property string ownDescription: ""
   // "was SUPER + F" hint for disabled rows.
@@ -171,6 +174,7 @@ Item {
     root.rehomeBannerText = ""
     root.rehomeLostKey = ""
     root.isRehome = false
+    root.actionDispatcher = ""
   }
 
   function openCreate(presetItem) {
@@ -185,7 +189,10 @@ Item {
       root.actionCategory = presetItem.category || "General"
       root.actionKey = presetItem.default_key || ""
       root.actionType = presetItem.name ? "preset" : "custom"
-      root.bindingId = (presetItem.name || presetItem.description) ? Model.rowId(presetItem) : ""
+      // Catalog `id` is a preset id ("win.close"), not a binding id: row_id is
+      // the existing binding row for this action, or null for a brand-new one.
+      root.bindingId = presetItem.row_id || ""
+      root.actionDispatcher = (presetItem.dispatcher && presetItem.dispatcher !== "exec") ? presetItem.dispatcher : ""
     } else {
       root.actionTitle = ""
       root.actionCommand = ""
@@ -276,8 +283,12 @@ Item {
     if (!root.canSave) return
     var key = keyRecorder.value
     var id = root.effectiveId
+    // A catalog preset with a Lua dispatcher is written as that action (like
+    // stock bindings); otherwise the command string is exec'd.
+    var action = (root.actionType === "preset" && root.actionDispatcher) ? root.actionDispatcher : ""
+    var cmd = action ? "" : root.actionCommand
     root.opened = false
-    root.saved(key, root.actionTitle.trim(), root.actionCommand, "", root.oldKey, id)
+    root.saved(key, root.actionTitle.trim(), cmd, action, root.oldKey, id)
   }
 
   function requestDisable() {
@@ -548,7 +559,9 @@ Item {
                       root.actionTitle = presetChip.modelData.name
                       root.actionCommand = presetChip.modelData.command
                       root.actionCategory = presetChip.modelData.category
-                      root.bindingId = Model.rowId(presetChip.modelData)
+                      root.bindingId = presetChip.modelData.row_id || ""
+                      root.actionDispatcher = (presetChip.modelData.dispatcher && presetChip.modelData.dispatcher !== "exec")
+                        ? presetChip.modelData.dispatcher : ""
                       if (!keyRecorder.value && presetChip.modelData.default_key) {
                         keyRecorder.load(presetChip.modelData.default_key)
                       }

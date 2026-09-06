@@ -301,35 +301,6 @@ Panel {
     root.close()
   }
 
-  // ---- Quick keybind management actions (dropdown list) ----
-
-  function resetKeybinding(key, defaultKey) {
-    kbResetProc.running = false
-    kbResetProc.command = [
-      Quickshell.env("HOME") + "/.config/omarchy/plugins/davedes.mouse-keybind-settings/backend/keybinds_manager.py",
-      "reset", key, defaultKey || ""
-    ]
-    kbResetProc.running = true
-  }
-
-  function enableKeybinding(key) {
-    kbEnableProc.running = false
-    kbEnableProc.command = [
-      Quickshell.env("HOME") + "/.config/omarchy/plugins/davedes.mouse-keybind-settings/backend/keybinds_manager.py",
-      "enable", key
-    ]
-    kbEnableProc.running = true
-  }
-
-  function disableKeybinding(key) {
-    kbDisableProc.running = false
-    kbDisableProc.command = [
-      Quickshell.env("HOME") + "/.config/omarchy/plugins/davedes.mouse-keybind-settings/backend/keybinds_manager.py",
-      "disable", key
-    ]
-    kbDisableProc.running = true
-  }
-
   // Periodic poll & initial query
   Timer {
     interval: 5000
@@ -481,25 +452,6 @@ Panel {
         }
       }
     }
-  }
-
-  // Quick keybind mutation processes (bounded)
-  BoundedProcess {
-    id: kbResetProc
-    timeoutMs: 30000
-    onFinished: root.refreshKeybindData()
-  }
-
-  BoundedProcess {
-    id: kbEnableProc
-    timeoutMs: 30000
-    onFinished: root.refreshKeybindData()
-  }
-
-  BoundedProcess {
-    id: kbDisableProc
-    timeoutMs: 30000
-    onFinished: root.refreshKeybindData()
   }
 
   Timer {
@@ -693,7 +645,7 @@ Panel {
               implicitWidth: Style.space(28)
               implicitHeight: Style.space(28)
               radius: Style.cornerRadius
-              color: editIconHover.hovered ? Style.normalFillFor(root.foreground, root.accent) : "transparent"
+              color: editIconHover.containsMouse ? Style.normalFillFor(root.foreground, root.accent) : "transparent"
               borderSpec: Border.controlSpec("normal", root.foreground, root.accent)
 
               Text {
@@ -1383,15 +1335,15 @@ Panel {
               implicitHeight: Style.space(26)
               implicitWidth: Style.space(110)
               radius: Style.cornerRadius
-              color: resetHover.hovered ? Style.selectedFillFor(root.foreground, root.urgent) : "transparent"
+              color: resetHover.containsMouse ? Style.selectedFillFor(root.foreground, root.urgent) : "transparent"
               borderSpec: Border.controlSpec("normal", root.foreground, root.accent)
 
               RowLayout {
                 anchors.centerIn: parent
                 spacing: 3
 
-                Text { text: "󰁯"; color: resetHover.hovered ? root.urgent : root.foreground; font.family: root.fontFamily }
-                Text { text: "Reset Defaults"; color: resetHover.hovered ? root.urgent : root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.caption }
+                Text { text: "󰁯"; color: resetHover.containsMouse ? root.urgent : root.foreground; font.family: root.fontFamily }
+                Text { text: "Reset Defaults"; color: resetHover.containsMouse ? root.urgent : root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.caption }
               }
 
               MouseArea {
@@ -1410,15 +1362,15 @@ Panel {
               implicitHeight: Style.space(26)
               implicitWidth: Style.space(138)
               radius: Style.cornerRadius
-              color: buyHover.hovered ? Util.alpha("#FF813F", 0.22) : Util.alpha("#FF813F", 0.10)
-              borderSpec: Border.controlSpec(buyHover.hovered ? "hover-cursor" : "normal", root.foreground, root.accent)
+              color: buyHover.containsMouse ? Util.alpha("#FF813F", 0.22) : Util.alpha("#FF813F", 0.10)
+              borderSpec: Border.controlSpec(buyHover.containsMouse ? "hover-cursor" : "normal", root.foreground, root.accent)
 
               RowLayout {
                 anchors.centerIn: parent
                 spacing: 3
 
                 Text { text: "☕"; color: "#FF813F"; font.family: root.fontFamily; font.pixelSize: Style.space(13) }
-                Text { text: "Buy Me a Coffee"; color: buyHover.hovered ? "#FFB347" : "#FF813F"; font.family: root.fontFamily; font.pixelSize: Style.font.caption - 1; font.bold: true }
+                Text { text: "Buy Me a Coffee"; color: buyHover.containsMouse ? "#FFB347" : "#FF813F"; font.family: root.fontFamily; font.pixelSize: Style.font.caption - 1; font.bold: true }
               }
 
               MouseArea {
@@ -2084,8 +2036,8 @@ Panel {
             Layout.fillWidth: true
             implicitHeight: Style.space(40)
             radius: Style.cornerRadius
-            color: launchHover.hovered ? Style.selectedFillFor(root.foreground, root.accent) : Style.normalFillFor(root.foreground, root.accent)
-            borderSpec: Border.controlSpec(launchHover.hovered ? "hover-cursor" : "normal", root.foreground, root.accent)
+            color: launchHover.containsMouse ? Style.selectedFillFor(root.foreground, root.accent) : Style.normalFillFor(root.foreground, root.accent)
+            borderSpec: Border.controlSpec(launchHover.containsMouse ? "hover-cursor" : "normal", root.foreground, root.accent)
 
             RowLayout {
               anchors.centerIn: parent

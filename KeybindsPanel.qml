@@ -52,13 +52,15 @@ Item {
   property bool settingsOpen: false
 
   // Bindings that lost their key and still need a new one:
-  // [{ id, description, lostKey, winner, default_key }]
+  // [{ id, description, lostKey, winner, default_key, action, command }]
   property var rehomeQueue: []
   // Set when the queue should auto-open its next entry after the next refresh.
   property bool rehomeAutoOpen: false
 
   // Any backend mutator in flight. Never restart a live process: block instead.
-  readonly property bool busy: setProc.running || resetProc.running || enableProc.running || disableProc.running
+  readonly property bool busy: setProc.running || resetProc.running || enableProc.running || disableProc.running || migrateProc.running
+  // One-shot: move the old plugin's trailing hl.unbind/o.bind lines into the managed block.
+  property bool migrationTried: false
 
   // In-flight save (needed to re-run with --displace or to queue a rehome)
   property var pendingSave: null
@@ -300,13 +302,7 @@ Item {
   function queueEntryFor(row) {
     if (!row) return null
     var idx = root.queueIndexOf(Model.rowId(row))
-    if (idx >= 0) return root.rehomeQueue[idx]
-    // Fallback: the backend's `displaced` row may carry no id.
-    var desc = String(row.description || "").toLowerCase()
-    for (var i = 0; i < root.rehomeQueue.length; i++) {
-      if (desc && String(root.rehomeQueue[i].description || "").toLowerCase() === desc) return root.rehomeQueue[i]
-    }
-    return null
+    return idx >= 0 ? root.rehomeQueue[idx] : null
   }
 
   function queuedRow(entry) {
@@ -322,7 +318,9 @@ Item {
       description: binding.description || "",
       lostKey: lostKey || binding.default_key || "",
       winner: winner || "",
-      default_key: binding.default_key || ""
+      default_key: binding.default_key || "",
+      action: binding.action || "",
+      command: binding.command || ""
     }
     var q = root.rehomeQueue.slice()
     var idx = root.queueIndexOf(id)
@@ -354,7 +352,8 @@ Item {
     if (!entry) return
     var row = root.queuedRow(entry)
     if (!row) {
-      row = { id: entry.id, description: entry.description, default_key: entry.default_key, status: "disabled", key: null }
+      row = { id: entry.id, description: entry.description, default_key: entry.default_key,
+              action: entry.action || "", command: entry.command || "", status: "disabled", key: null }
     }
     var lostKey = row.default_key || entry.lostKey
     editDialog.openRehome(row, lostKey, entry.winner)
@@ -552,8 +551,32 @@ Item {
         Qt.callLater(root.loadData)
         return
       }
+      if (root.tryMigration()) return
       root.pruneRehomeQueue()
       root.advanceRehomeQueue()
+    }
+  }
+
+  // Run `migrate` once per session when the backend reports stray trailing
+  // lines; the list is reloaded afterwards. Deferred (not consumed) while busy.
+  function tryMigration() {
+    if (root.migrationTried || root.busy) return false
+    if (!(Number(root.modelData.pending_migration) > 0)) return false
+    root.migrationTried = true
+    return root.startProc(migrateProc, ["migrate"])
+  }
+
+  BoundedProcess {
+    id: migrateProc
+    maxBytes: 262144
+    timeoutMs: 30000
+    onFinished: {
+      root.loading = false
+      var res = root.parseResult(migrateProc)
+      if (!success || !res || res.success === false) {
+        root.showToast("Migration failed: " + root.failureText(migrateProc, res, "unknown error"))
+      }
+      root.loadData()
     }
   }
 

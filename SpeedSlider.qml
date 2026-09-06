@@ -1,5 +1,6 @@
 import QtQuick
 import qs.Commons
+import qs.Ui
 
 // Horizontal slider for the mouse panel. Derived from Omarchy's Ui/PanelSlider
 // with two deliberate differences:

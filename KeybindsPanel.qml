@@ -784,7 +784,9 @@ Item {
         }
       }
 
-      // Escape: popover -> conflict card -> dialog -> panel, in that order.
+      // Escape: popover -> conflict card -> dialog, in that order. It never
+      // closes the window itself: that is the window manager's job (Super+Q
+      // here), and an Escape meant for a dialog must not take the panel with it.
       Keys.onEscapePressed: function(event) {
         if (root.recordingSearch) {
           root.recordingSearch = false
@@ -794,8 +796,6 @@ Item {
           root.resolveAsk("cancel")
         } else if (editDialog.opened) {
           editDialog.close()
-        } else {
-          root.requestClose()
         }
         event.accepted = true
       }
